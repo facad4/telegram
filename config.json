@@ -1,0 +1,6 @@
+{
+  "channels": ["https://t.me/abualiexpress", "https://t.me/ziv710", "https://t.me/alexmehacarmel"],
+  "refresh_interval_minutes": 5,
+  "max_posts": 20,
+  "scroll_speed": 50
+}

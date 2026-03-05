@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Telegram Channel Updates</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0e1117;
+      --card-bg: #1a1d27;
+      --text: #e8eaed;
+      --text-secondary: #9aa0a6;
+      --accent: #2196f3;
+      --accent-light: #1a3a5c;
+      --border: #2d3240;
+      --radius: 14px;
+    }
+
+    html, body {
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .header {
+      background: var(--card-bg);
+      border-bottom: 1px solid var(--border);
+      height: 44px;
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      flex-shrink: 0;
+      justify-content: space-between;
+      z-index: 10;
+    }
+
+    .header h1 {
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--accent);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .header h1 svg { width: 20px; height: 20px; fill: var(--accent); }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .filter-bar { display: flex; gap: 5px; }
+
+    .filter-btn {
+      padding: 4px 12px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: transparent;
+      color: var(--text-secondary);
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+
+    .filter-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .filter-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+    .status {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      white-space: nowrap;
+    }
+
+    .status-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #4caf50; display: inline-block;
+    }
+
+    .status-dot.loading { background: #ff9800; animation: pulse 1s infinite; }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    .scroll-viewport {
+      flex: 1;
+      overflow-y: auto;
+      position: relative;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+
+    .scroll-viewport::-webkit-scrollbar { width: 6px; }
+    .scroll-viewport::-webkit-scrollbar-track { background: transparent; }
+    .scroll-viewport::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    .scroll-track {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 16px 12vw;
+    }
+
+    .post-card {
+      background: var(--card-bg);
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      overflow: hidden;
+      cursor: pointer;
+      display: flex;
+      flex-direction: row;
+      min-height: calc(50vh - 40px);
+      transition: border-color 0.2s;
+      flex-shrink: 0;
+    }
+
+    .post-card:hover { border-color: var(--accent); }
+
+    .post-media-side {
+      width: 40%;
+      max-width: 500px;
+      flex-shrink: 0;
+      overflow: hidden;
+      background: #111318;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .post-media-side img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .post-media-side.empty {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 80px;
+      min-width: 80px;
+      max-width: 80px;
+    }
+
+    .channel-icon-large {
+      width: 52px; height: 52px; border-radius: 50%;
+      background: var(--accent); display: flex; align-items: center;
+      justify-content: center; color: #fff; font-weight: 700;
+      font-size: 1.5rem;
+    }
+
+    .channel-icon-large img {
+      width: 52px; height: 52px; border-radius: 50%; object-fit: cover;
+    }
+
+    .post-content {
+      flex: 1;
+      padding: 28px 48px;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .post-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .post-avatar {
+      width: 36px; height: 36px; border-radius: 50%;
+      object-fit: cover; flex-shrink: 0;
+    }
+
+    .post-avatar-placeholder {
+      width: 36px; height: 36px; border-radius: 50%;
+      background: var(--accent); display: flex; align-items: center;
+      justify-content: center; color: #fff; font-weight: 700;
+      font-size: 1rem; flex-shrink: 0;
+    }
+
+    .post-meta { flex: 1; min-width: 0; }
+
+    .post-channel {
+      font-weight: 600; font-size: 1.3rem; color: var(--text);
+      text-decoration: none; display: block;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    .post-channel:hover { color: var(--accent); }
+
+    .post-date { font-size: 1rem; color: var(--text-secondary); }
+
+    .post-body {
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .post-text {
+      font-size: 2rem;
+      line-height: 1.55;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+      color: var(--text);
+    }
+
+    .post-text a { color: var(--accent); text-decoration: none; }
+    .post-text a:hover { text-decoration: underline; }
+
+    .post-link-preview {
+      margin-top: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      text-decoration: none;
+      display: block;
+      color: inherit;
+    }
+
+    .post-link-preview:hover { border-color: var(--accent); }
+    .post-link-preview-text { padding: 8px 12px; }
+
+    .post-link-preview-title {
+      font-weight: 600; font-size: 1.15rem;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      color: var(--accent);
+    }
+
+    .post-link-preview-desc {
+      font-size: 1.05rem; color: var(--text-secondary); margin-top: 2px;
+      display: -webkit-box; -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical; overflow: hidden;
+    }
+
+    .post-footer {
+      display: flex; align-items: center; justify-content: space-between;
+      padding-top: 10px; font-size: 1.05rem; color: var(--text-secondary);
+      margin-top: auto;
+    }
+
+    .post-views { display: flex; align-items: center; gap: 4px; }
+    .post-views svg { width: 18px; height: 18px; fill: var(--text-secondary); }
+
+    .post-open-link {
+      color: var(--accent); text-decoration: none; font-weight: 500;
+    }
+    .post-open-link:hover { text-decoration: underline; }
+
+    .loading-container {
+      width: 100%; height: 100%;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      color: var(--text-secondary); gap: 12px;
+    }
+
+    .spinner {
+      width: 32px; height: 32px;
+      border: 3px solid var(--border); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .error-msg, .empty-msg { text-align: center; padding: 40px 20px; color: var(--text-secondary); }
+    .error-msg { color: #ef5350; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>
+      <svg viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12s5.37 12 12 12 12-5.37 12-12S18.63 0 12 0zm5.53 8.15l-1.67 7.87c-.12.56-.45.7-.91.44l-2.52-1.86-1.22 1.17c-.13.13-.25.25-.51.25l.18-2.57 4.67-4.22c.2-.18-.04-.28-.32-.1l-5.77 3.64-2.49-.78c-.54-.17-.55-.54.11-.8l9.73-3.75c.45-.17.85.11.72.81z"/></svg>
+      Channel Updates
+    </h1>
+    <div class="header-right">
+      <div class="filter-bar" id="filterBar"></div>
+      <div class="status">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">Loading...</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="scroll-viewport" id="scrollViewport">
+    <div class="scroll-track" id="postsContainer">
+      <div class="loading-container">
+        <div class="spinner"></div>
+        <span>Fetching latest posts...</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let allPosts = [];
+    let activeFilter = null;
+    let refreshMs = 5 * 60 * 1000;
+    let refreshTimer = null;
+    let scrollSpeed = 50;
+    let scrollAnimId = null;
+    let paused = false;
+
+    async function fetchConfig() {
+      try {
+        const resp = await fetch('/api/config');
+        const data = await resp.json();
+        refreshMs = (data.refresh_interval_minutes || 5) * 60 * 1000;
+        scrollSpeed = data.scroll_speed || 50;
+      } catch (e) {}
+    }
+
+    async function fetchPosts() {
+      const dot = document.getElementById('statusDot');
+      const text = document.getElementById('statusText');
+      dot.classList.add('loading');
+      text.textContent = 'Refreshing...';
+
+      try {
+        const resp = await fetch('/api/posts');
+        if (!resp.ok) throw new Error('Failed');
+        allPosts = await resp.json();
+        // latest posts first (already sorted newest-first from API)
+        renderFilters();
+        renderPosts();
+        const now = new Date();
+        text.textContent = `Updated ${now.toLocaleTimeString()}`;
+        dot.classList.remove('loading');
+      } catch (e) {
+        dot.classList.remove('loading');
+        dot.style.background = '#ef5350';
+        text.textContent = 'Error';
+        document.getElementById('postsContainer').innerHTML =
+          '<div class="error-msg">Failed to load posts. Will retry on next refresh.</div>';
+      }
+    }
+
+    let manualScrollTimer = null;
+
+    function startScrolling() {
+      const viewport = document.getElementById('scrollViewport');
+      viewport.scrollTop = 0;
+
+      if (scrollAnimId) cancelAnimationFrame(scrollAnimId);
+
+      paused = true;
+      setTimeout(() => { paused = false; }, 2000);
+
+      let lastTime = null;
+      function tick(time) {
+        if (!lastTime) lastTime = time;
+        const dt = (time - lastTime) / 1000;
+        lastTime = time;
+
+        if (!paused) {
+          const maxScroll = viewport.scrollHeight - viewport.clientHeight;
+          if (maxScroll > 0) {
+            viewport.scrollTop += scrollSpeed * dt;
+            if (viewport.scrollTop >= maxScroll) {
+              paused = true;
+              setTimeout(() => {
+                viewport.scrollTop = 0;
+                lastTime = null;
+                paused = false;
+              }, 3000);
+            }
+          }
+        }
+
+        scrollAnimId = requestAnimationFrame(tick);
+      }
+
+      scrollAnimId = requestAnimationFrame(tick);
+    }
+
+    const viewport = document.getElementById('scrollViewport');
+
+    viewport.addEventListener('wheel', () => {
+      paused = true;
+      clearTimeout(manualScrollTimer);
+      manualScrollTimer = setTimeout(() => { paused = false; }, 4000);
+    }, { passive: true });
+
+    viewport.addEventListener('touchstart', () => {
+      paused = true;
+      clearTimeout(manualScrollTimer);
+    }, { passive: true });
+
+    viewport.addEventListener('touchend', () => {
+      clearTimeout(manualScrollTimer);
+      manualScrollTimer = setTimeout(() => { paused = false; }, 4000);
+    }, { passive: true });
+
+    function renderFilters() {
+      const bar = document.getElementById('filterBar');
+      const channels = [...new Set(allPosts.map(p => p.channel))];
+      if (channels.length < 2) { bar.innerHTML = ''; return; }
+
+      let html = `<button class="filter-btn ${!activeFilter ? 'active' : ''}" data-filter="">All</button>`;
+      for (const ch of channels) {
+        const title = allPosts.find(p => p.channel === ch)?.channel_title || ch;
+        html += `<button class="filter-btn ${activeFilter === ch ? 'active' : ''}" data-filter="${ch}">${title}</button>`;
+      }
+      bar.innerHTML = html;
+      bar.querySelectorAll('.filter-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          activeFilter = btn.dataset.filter || null;
+          renderFilters();
+          renderPosts();
+        });
+      });
+    }
+
+    function formatDate(isoStr) {
+      if (!isoStr) return '';
+      const d = new Date(isoStr);
+      const now = new Date();
+      const diffMs = now - d;
+      const diffMins = Math.floor(diffMs / 60000);
+      if (diffMins < 1) return 'just now';
+      if (diffMins < 60) return `${diffMins}m ago`;
+      const diffHours = Math.floor(diffMins / 60);
+      if (diffHours < 24) return `${diffHours}h ago`;
+      const diffDays = Math.floor(diffHours / 24);
+      if (diffDays < 7) return `${diffDays}d ago`;
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: d.getFullYear() !== now.getFullYear() ? 'numeric' : undefined });
+    }
+
+    function sanitizeHtml(html) {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = html;
+      tmp.querySelectorAll('a').forEach(a => {
+        a.removeAttribute('onclick');
+        a.setAttribute('target', '_blank');
+        a.setAttribute('rel', 'noopener noreferrer');
+      });
+      return tmp.innerHTML;
+    }
+
+    function renderPosts() {
+      const container = document.getElementById('postsContainer');
+      const filtered = activeFilter ? allPosts.filter(p => p.channel === activeFilter) : allPosts;
+
+      if (!filtered.length) {
+        container.innerHTML = '<div class="empty-msg">No posts to display.</div>';
+        return;
+      }
+
+      container.innerHTML = filtered.map(post => {
+        const avatarHtml = post.channel_photo
+          ? `<img class="post-avatar" src="${post.channel_photo}" alt="">`
+          : `<div class="post-avatar-placeholder">${(post.channel_title || post.channel)[0].toUpperCase()}</div>`;
+
+        const mediaSrc = post.photo_url || post.video_thumb;
+        let mediaSideHtml;
+        if (mediaSrc) {
+          mediaSideHtml = `<div class="post-media-side"><img src="${mediaSrc}" alt="" loading="lazy"></div>`;
+        } else {
+          const iconHtml = post.channel_photo
+            ? `<img src="${post.channel_photo}" alt="">`
+            : (post.channel_title || post.channel)[0].toUpperCase();
+          mediaSideHtml = `<div class="post-media-side empty"><div class="channel-icon-large">${iconHtml}</div></div>`;
+        }
+
+        let linkPreviewHtml = '';
+        if (post.link_preview && post.link_preview.title) {
+          const lp = post.link_preview;
+          linkPreviewHtml = `
+            <a class="post-link-preview" href="${lp.url}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">
+              <div class="post-link-preview-text">
+                <div class="post-link-preview-title">${lp.title}</div>
+                ${lp.description ? `<div class="post-link-preview-desc">${lp.description}</div>` : ''}
+              </div>
+            </a>`;
+        }
+
+        return `
+          <div class="post-card" onclick="window.open('${post.post_url}','_blank')">
+            ${mediaSideHtml}
+            <div class="post-content">
+              <div class="post-header">
+                ${avatarHtml}
+                <div class="post-meta">
+                  <a class="post-channel" href="https://t.me/${post.channel}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${post.channel_title || post.channel}</a>
+                  <div class="post-date">${formatDate(post.datetime)}</div>
+                </div>
+              </div>
+              <div class="post-body">
+                <div class="post-text">${sanitizeHtml(post.text_html)}</div>
+              </div>
+              ${linkPreviewHtml}
+              <div class="post-footer">
+                <div class="post-views">
+                  <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                  ${post.views}
+                </div>
+                <a class="post-open-link" href="${post.post_url}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Open in Telegram</a>
+              </div>
+            </div>
+          </div>`;
+      }).join('');
+
+      startScrolling();
+    }
+
+    async function init() {
+      await fetchConfig();
+      await fetchPosts();
+      if (refreshTimer) clearInterval(refreshTimer);
+      refreshTimer = setInterval(fetchPosts, refreshMs);
+    }
+
+    init();
+  </script>
+</body>
+</html>
