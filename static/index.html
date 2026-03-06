@@ -182,6 +182,8 @@
       display: flex;
       align-items: center;
       gap: 8px;
+      flex-shrink: 0;
+      white-space: nowrap;
     }
 
     .control-btn {
@@ -346,7 +348,7 @@
     }
 
     .post-text {
-      font-size: 2rem;
+      font-size: 1.4rem;
       line-height: 1.55;
       word-wrap: break-word;
       overflow-wrap: break-word;
@@ -448,7 +450,7 @@
 
       /* Smaller typography for mobile */
       .post-text {
-        font-size: 1.2rem;
+        font-size: 1rem;
         line-height: 1.5;
       }
 
@@ -490,6 +492,10 @@
       .control-btn svg {
         width: 14px;
         height: 14px;
+      }
+
+      .control-buttons {
+        gap: 6px;
       }
 
       /* Link preview adjustments */
@@ -724,34 +730,36 @@
 </head>
 <body>
   <div class="header">
-    <h1>
-      <svg viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12s5.37 12 12 12 12-5.37 12-12S18.63 0 12 0zm5.53 8.15l-1.67 7.87c-.12.56-.45.7-.91.44l-2.52-1.86-1.22 1.17c-.13.13-.25.25-.51.25l.18-2.57 4.67-4.22c.2-.18-.04-.28-.32-.1l-5.77 3.64-2.49-.78c-.54-.17-.55-.54.11-.8l9.73-3.75c.45-.17.85.11.72.81z"/></svg>
-      Channel Updates
-    </h1>
     <div class="nav-links">
       <a href="#" class="nav-link active" id="mainFeedLink">Main</a>
-      <a href="#" class="nav-link" id="pazFeedLink">P</a>
-      <a href="#" class="nav-link" id="managementLink">⚙️</a>
+    </div>
+    <div class="control-buttons">
+      <button class="control-btn" id="syncBtn" title="Refresh posts manually">
+        <svg viewBox="0 0 24 24">
+          <path d="M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z"/>
+        </svg>
+      </button>
+      <button class="control-btn" id="orderBtn" title="Toggle post order (newest/oldest first)">
+        <svg viewBox="0 0 24 24">
+          <path d="M19,7H22L18,3L14,7H17V21H19V7M9,21H11V19H9V21M9,17H11V15H9V17M9,13H11V11H9V13M9,9H11V7H9V9M5,19V21H7V19H5M5,15V17H7V15H5M5,11V13H7V11H5M5,7V9H7V7H5M5,3V5H7V3H5Z"/>
+        </svg>
+        <span id="orderText">New</span>
+      </button>
+      <button class="control-btn" id="stopScrollBtn" title="Stop/Resume auto-scrolling">
+        <svg viewBox="0 0 24 24" id="stopScrollIcon">
+          <path d="M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z"/>
+        </svg>
+        <span id="stopScrollText">Stop</span>
+      </button>
     </div>
     <div class="header-right">
       <div class="filter-bar" id="filterBar"></div>
-      <div class="control-buttons">
-        <button class="control-btn" id="syncBtn" title="Refresh posts manually">
-          <svg viewBox="0 0 24 24">
-            <path d="M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z"/>
-          </svg>
-        </button>
-        <button class="control-btn" id="orderBtn" title="Toggle post order (newest/oldest first)">
-          <svg viewBox="0 0 24 24">
-            <path d="M19,7H22L18,3L14,7H17V21H19V7M9,21H11V19H9V21M9,17H11V15H9V17M9,13H11V11H9V13M9,9H11V7H9V9M5,19V21H7V19H5M5,15V17H7V15H5M5,11V13H7V11H5M5,7V9H7V7H5M5,3V5H7V3H5Z"/>
-          </svg>
-          <span id="orderText">New</span>
-        </button>
-      </div>
       <div class="status">
         <span class="status-dot" id="statusDot"></span>
         <span id="statusText">Loading...</span>
       </div>
+      <a href="#" class="nav-link" id="pazFeedLink">P</a>
+      <a href="#" class="nav-link" id="managementLink">⚙️</a>
     </div>
   </div>
 
@@ -813,6 +821,7 @@
     let fullConfig = {};
     let sortNewestFirst = true; // true = newest first, false = oldest first
     let isManualRefreshing = false;
+    let isScrollingStopped = false;
 
     async function fetchConfig() {
       try {
@@ -865,7 +874,7 @@
         const dt = (time - lastTime) / 1000;
         lastTime = time;
 
-        if (!paused) {
+        if (!paused && !isScrollingStopped) {
           const maxScroll = viewport.scrollHeight - viewport.clientHeight;
           if (maxScroll > 0) {
             viewport.scrollTop += scrollSpeed * dt;
@@ -1214,6 +1223,24 @@
       renderPosts();
     }
 
+    // Toggle stop scrolling function
+    function toggleStopScrolling() {
+      isScrollingStopped = !isScrollingStopped;
+      const stopScrollText = document.getElementById('stopScrollText');
+      const stopScrollBtn = document.getElementById('stopScrollBtn');
+      const stopScrollIcon = document.getElementById('stopScrollIcon');
+      
+      if (isScrollingStopped) {
+        stopScrollText.textContent = 'Resume';
+        stopScrollBtn.title = 'Resume auto-scrolling';
+        stopScrollIcon.innerHTML = '<path d="M8,5.14V19.14L19,12.14L8,5.14Z"/>';
+      } else {
+        stopScrollText.textContent = 'Stop';
+        stopScrollBtn.title = 'Stop auto-scrolling';
+        stopScrollIcon.innerHTML = '<path d="M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z"/>';
+      }
+    }
+
     async function init() {
       // Set up navigation event listeners
       document.getElementById('mainFeedLink').addEventListener('click', (e) => {
@@ -1234,6 +1261,7 @@
       // Set up control button event listeners
       document.getElementById('syncBtn').addEventListener('click', manualSync);
       document.getElementById('orderBtn').addEventListener('click', toggleSortOrder);
+      document.getElementById('stopScrollBtn').addEventListener('click', toggleStopScrolling);
 
       await fetchConfig();
       await fetchPosts();
