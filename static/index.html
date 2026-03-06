@@ -279,6 +279,107 @@
 
     .error-msg, .empty-msg { text-align: center; padding: 40px 20px; color: var(--text-secondary); }
     .error-msg { color: #ef5350; }
+
+    /* Mobile Portrait Mode Support */
+    @media (max-width: 768px) and (orientation: portrait) {
+      /* Reduce horizontal padding for mobile */
+      .scroll-track {
+        padding: 16px 4vw;
+      }
+
+      /* Change post cards to vertical layout */
+      .post-card {
+        flex-direction: column;
+        min-height: auto;
+      }
+
+      /* Media section adjustments for mobile */
+      .post-media-side {
+        width: 100%;
+        max-width: none;
+        height: 200px;
+        flex-shrink: 0;
+      }
+
+      .post-media-side.empty {
+        width: 100%;
+        min-width: auto;
+        max-width: none;
+        height: 120px;
+      }
+
+      /* Content section mobile adjustments */
+      .post-content {
+        padding: 20px 16px;
+      }
+
+      /* Smaller typography for mobile */
+      .post-text {
+        font-size: 1.2rem;
+        line-height: 1.5;
+      }
+
+      .post-channel {
+        font-size: 1rem;
+      }
+
+      .post-date {
+        font-size: 0.9rem;
+      }
+
+      /* Header adjustments for mobile */
+      .header {
+        padding: 0 16px;
+      }
+
+      .header h1 {
+        font-size: 0.9rem;
+      }
+
+      .filter-btn {
+        font-size: 0.8rem;
+        padding: 3px 10px;
+      }
+
+      .status {
+        font-size: 0.7rem;
+      }
+
+      /* Link preview adjustments */
+      .post-link-preview-title {
+        font-size: 1rem;
+      }
+
+      .post-link-preview-desc {
+        font-size: 0.95rem;
+      }
+
+      /* Footer adjustments */
+      .post-footer {
+        font-size: 0.95rem;
+      }
+
+      /* Avatar and icon adjustments */
+      .post-avatar, .post-avatar-placeholder {
+        width: 32px;
+        height: 32px;
+      }
+
+      .post-avatar-placeholder {
+        font-size: 0.9rem;
+      }
+
+      .channel-icon-large {
+        width: 48px;
+        height: 48px;
+        font-size: 1.3rem;
+      }
+
+      .channel-icon-large img {
+        width: 48px;
+        height: 48px;
+      }
+    }
   </style>
 </head>
 <body>
