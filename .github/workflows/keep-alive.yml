@@ -5,6 +5,9 @@ on:
     # Runs every 10 minutes
     - cron: '*/10 * * * *'
   workflow_dispatch: # Allows manual triggering
+  push:
+    branches: [ main ]
+    paths: [ '.github/workflows/keep-alive.yml' ]
 
 jobs:
   keep-alive:
