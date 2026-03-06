@@ -13,15 +13,20 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 
 ### 1. Channel Configuration
 - **File**: `config.json`
-- **Current configuration**:
+- **Enhanced configuration with dual feeds**:
   ```json
   {
     "channels": ["https://t.me/abualiexpress", "https://t.me/ziv710", "https://t.me/alexmehacarmel"],
+    "paz_channels": [],
     "refresh_interval_minutes": 5,
     "max_posts": 20,
     "scroll_speed": 50
   }
   ```
+- **Dual Feed Support**:
+  - **Main Feed**: `channels` array for primary content
+  - **Paz Feed**: `paz_channels` array for secondary content stream
+  - **Independent Configuration**: Each feed can have different channels
 - **Channel formats supported**:
   - Plain name: `"channelname"`
   - With @: `"@channelname"`
@@ -84,6 +89,11 @@ Returns the latest posts from all configured channels, sorted by datetime (newes
 ]
 ```
 
+#### `GET /api/paz/posts`
+Returns the latest posts from Paz feed channels, sorted by datetime (newest first), limited to `max_posts`.
+
+**Implementation**: Same as `/api/posts` but uses `paz_channels` configuration
+
 #### `GET /api/config`
 Returns client-specific configuration settings from `config.json`.
 
@@ -97,15 +107,35 @@ Returns client-specific configuration settings from `config.json`.
 }
 ```
 
+#### `GET /api/admin/config`
+Returns full configuration for management interface.
+
+**Implementation**: Returns complete `config.json` content for admin interface
+
+#### `POST /api/admin/config`
+Updates configuration via management interface.
+
+**Implementation**: Accepts JSON payload and overwrites `config.json`
+
+#### `GET /api/admin/config/download`
+Downloads current `config.json` file.
+
+**Implementation**: Returns `config.json` as downloadable file attachment
+
 #### `GET /health`
 Health check endpoint returning `{"status": "ok"}`.
 
 #### `GET /`
 Serves the main application (`static/index.html`).
 
+#### PWA Support
+- **`GET /static/manifest.json`**: Web app manifest with correct MIME type
+- **`GET /static/sw.js`**: Service worker for PWA compliance
+
 #### Static Files
 - **Mount point**: `/static` serves files from `static/` directory
 - **Main app**: `static/index.html` contains the entire frontend application
+- **PWA assets**: Icons, manifest, and service worker files
 
 ### 4. Frontend Interface (`static/index.html`)
 
@@ -120,14 +150,41 @@ Serves the main application (`static/index.html`).
 - **Typography**: System font stack (-apple-system, BlinkMacSystemFont, Segoe UI, etc.)
 - **Border radius**: 14px consistent rounded corners
 
+#### Enhanced Navigation System
+- **Multi-View Interface**: Three distinct views accessible via header navigation
+  - **Main Feed**: Primary channel content (default view)
+  - **Paz Feed**: Secondary channel content (accessed via "P" link)
+  - **Management Interface**: Configuration and admin controls (⚙️ icon)
+- **Navigation Links**: Horizontal navigation with active state indicators
+- **Context-Aware UI**: Different controls shown based on current view
+
 #### Layout Structure
-- **Header**: Fixed 44px height with title, filters, and status indicator
+- **Header**: Fixed 44px height with enhanced navigation and controls
+  - **Horizontally Scrollable**: Entire header scrolls when content overflows
+  - **Navigation Links**: Main, Paz ("P"), and Management (⚙️)
+  - **Control Buttons**: Manual sync and sort order toggle
+  - **Scrollable Filter Bar**: Channel filter buttons with horizontal scroll
+  - **Status Indicator**: Loading states and last update time
 - **Viewport**: Flex-grow scrollable area with thin scrollbars
-- **Cards**: Horizontal layout with media side (40% width, max 500px) and content area
-- **Responsive**: 12vw horizontal margins, min-height 50vh per card
-- **Media handling**: 
-  - With media: Full-size image/video thumbnail on left
-  - Without media: 80px channel icon area with large avatar (52px)
+- **Cards**: Responsive layout adapting to screen orientation
+  - **Desktop/Landscape**: Horizontal layout with media side (40% width, max 500px)
+  - **Mobile Portrait**: Vertical layout with media above text
+- **Management Interface**: Full-screen configuration panel with scrollable content
+
+#### Mobile Portrait Mode Support
+- **Responsive Design**: Automatic detection of portrait orientation on mobile
+- **Layout Transformation**: 
+  - Posts switch from horizontal to vertical layout
+  - Media appears above text content
+  - Reduced text sizes for mobile readability
+- **Typography Scaling**:
+  - Post text: 2rem → 1.2rem
+  - Channel names: 1.3rem → 1rem
+  - Metadata: 1rem → 0.9rem
+- **Spacing Optimization**:
+  - Reduced horizontal padding (12vw → 4vw)
+  - Optimized content padding (28px 48px → 20px 16px)
+- **Auto-scroll Preserved**: Full functionality maintained in mobile mode
 
 #### Auto-scrolling Implementation
 - **Engine**: `requestAnimationFrame` with delta-time calculations
@@ -153,13 +210,32 @@ Serves the main application (`static/index.html`).
 - **Channel links**: Click to open channel page (event propagation stopped)
 - **Link previews**: Click to open external links
 - **Filter buttons**: Toggle between "All" and individual channels
+- **Control buttons**: Manual sync and sort order toggle
+- **Navigation links**: Switch between Main, Paz, and Management views
 - **Hover effects**: Border color changes, text color transitions
 
+#### Enhanced Control System
+- **Manual Sync Button**: 
+  - Instant refresh of current feed content
+  - Visual loading animation during refresh
+  - Prevents multiple simultaneous requests
+  - Works independently of automatic refresh timer
+- **Sort Order Toggle**:
+  - Switch between "Newest First" (default) and "Oldest First"
+  - Visual indicator showing current sort mode ("New"/"Old")
+  - Instant re-sorting without network requests
+  - Tooltip shows current sort state
+
 #### Channel Filtering System
-- **UI**: Dynamic filter bar in header (hidden if < 2 channels)
+- **UI**: Horizontally scrollable filter bar in header
+- **Scrollable Design**: 
+  - Desktop: 500px max-width with horizontal scroll
+  - Mobile: 250px max-width with touch scroll
+  - Styled scrollbars matching app theme
 - **Buttons**: "All" + individual channel buttons with active states
 - **State management**: `activeFilter` variable persists selection
 - **Implementation**: Filter posts array and re-render on change
+- **Context Awareness**: Hidden in Management view, visible in feed views
 
 #### Content Processing
 - **HTML sanitization**: `sanitizeHtml()` function removes `onclick`, adds security attributes
@@ -167,21 +243,43 @@ Serves the main application (`static/index.html`).
 - **Image loading**: Lazy loading with `loading="lazy"` attribute
 - **Error handling**: Loading states, error messages, empty state handling
 
-### 5. Data Flow
-1. **Initialization**: `init()` function calls `fetchConfig()` then `fetchPosts()`
-2. **Configuration**: Fetch `/api/config` to get `refresh_interval_minutes` and `scroll_speed`
-3. **Data loading**: Fetch `/api/posts` with loading indicator and status updates
-4. **Rendering pipeline**:
-   - `renderFilters()`: Create filter buttons if multiple channels exist
-   - `renderPosts()`: Generate HTML for filtered posts and start auto-scroll
-5. **Auto-refresh**: `setInterval` timer calls `fetchPosts()` every N minutes
-6. **Backend processing**: On each `/api/posts` request:
-   - Load `config.json`
-   - Normalize channel names with `normalize_channel()`
-   - Fetch all channels concurrently with `asyncio.gather()`
-   - Parse HTML with `parse_channel_posts()` for each channel
-   - Merge results, sort by datetime (descending), limit to `max_posts`
-7. **Error handling**: Failed requests show error message, retry on next refresh cycle
+### 5. Enhanced Data Flow
+
+#### Initialization and Configuration
+1. **Startup**: `init()` function initializes multi-view interface
+2. **Event Listeners**: Set up navigation, control buttons, and PWA service worker
+3. **Configuration**: Fetch `/api/config` to get `refresh_interval_minutes` and `scroll_speed`
+4. **Default View**: Load Main feed as default view
+
+#### Multi-View Data Management
+- **View Switching**: `showView(view)` function manages interface state
+  - **Main View**: Fetches from `/api/posts` (main channels)
+  - **Paz View**: Fetches from `/api/paz/posts` (paz channels)  
+  - **Management View**: Loads configuration interface
+- **Context-Aware Refresh**: Auto-refresh adapts to current view
+- **UI State Management**: Controls visibility of filters, buttons based on active view
+
+#### Enhanced Rendering Pipeline
+1. **Data Fetching**: View-specific API endpoints with loading states
+2. **Sorting**: Client-side sorting based on user preference (newest/oldest first)
+3. **Filtering**: Channel-specific filtering with scrollable filter bar
+4. **Rendering**: 
+   - `renderFilters()`: Dynamic, scrollable filter buttons
+   - `renderPosts()`: Responsive post cards with mobile support
+   - `startScrolling()`: Auto-scroll with pause/resume functionality
+
+#### Management Interface Flow
+1. **Configuration Loading**: Fetch full config via `/api/admin/config`
+2. **Dynamic Forms**: Generate channel management forms for both feeds
+3. **Real-time Updates**: Immediate UI updates for add/remove operations
+4. **Persistence**: Save changes via `/api/admin/config` POST
+5. **Download Support**: Export configuration via `/api/admin/config/download`
+
+#### PWA Integration
+1. **Service Worker**: Register minimal service worker for PWA compliance
+2. **Manifest**: Serve web app manifest with proper MIME types
+3. **Installation**: Support for "Add to Home Screen" functionality
+4. **Standalone Mode**: Full-screen experience without browser UI
 
 ### 6. Deployment Configuration
 
@@ -285,7 +383,7 @@ beautifulsoup4     # HTML parsing for post extraction
 }
 ```
 
-### Current production configuration:
+### Current production configuration with dual feeds:
 ```json
 {
   "channels": [
@@ -293,6 +391,7 @@ beautifulsoup4     # HTML parsing for post extraction
     "https://t.me/ziv710", 
     "https://t.me/alexmehacarmel"
   ],
+  "paz_channels": [],
   "refresh_interval_minutes": 5,
   "max_posts": 20,
   "scroll_speed": 50
@@ -305,11 +404,12 @@ beautifulsoup4     # HTML parsing for post extraction
 2. **Rate limiting**: Subject to Telegram's rate limiting on public preview pages
 3. **Content restrictions**: Some media may not be accessible in web preview format
 4. **Network dependencies**: Requires outbound HTTP access to `t.me` (may be blocked in some hosting environments)
-5. **No persistence**: Configuration changes require server restart or file modification
-6. **No real-time updates**: Relies on periodic polling rather than WebSocket/SSE
-7. **Memory usage**: All posts kept in memory (no pagination or cleanup)
-8. **Single-threaded**: FastAPI runs in single process (no horizontal scaling)
-9. **Keep-alive dependency**: Render.com free tier requires external pinging to prevent sleep
+5. **No real-time updates**: Relies on periodic polling rather than WebSocket/SSE
+6. **Memory usage**: All posts kept in memory (no pagination or cleanup)
+7. **Single-threaded**: FastAPI runs in single process (no horizontal scaling)
+8. **Keep-alive dependency**: Render.com free tier requires external pinging to prevent sleep
+9. **PWA offline limitations**: No offline functionality - requires internet connection
+10. **Configuration persistence**: Management interface changes persist immediately but require page refresh for some settings
 
 ## Implementation Details
 
@@ -324,23 +424,83 @@ beautifulsoup4     # HTML parsing for post extraction
 
 #### Frontend (`static/index.html`)
 - `fetchConfig()`: Loads client settings from `/api/config`
-- `fetchPosts()`: Main data fetching with loading states
+- `fetchPosts()`: Main feed data fetching with loading states
+- `fetchPazPosts()`: Paz feed data fetching
+- `showView(view)`: Multi-view navigation and state management
 - `startScrolling()`: Auto-scroll animation engine
-- `renderFilters()`: Dynamic filter button generation
-- `renderPosts()`: Post HTML generation and DOM insertion
+- `renderFilters()`: Dynamic, scrollable filter button generation
+- `renderPosts()`: Responsive post HTML generation with mobile support
+- `loadManagementInterface()`: Configuration interface loader
+- `renderChannelList()`: Dynamic channel management forms
+- `saveConfiguration()`: Configuration persistence via API
+- `downloadConfig()`: Configuration file download
+- `manualSync()`: Manual post refresh with loading states
+- `toggleSortOrder()`: Client-side post sorting toggle
 - `formatDate(isoStr)`: Relative time formatting
 - `sanitizeHtml(html)`: XSS prevention for post content
 
 ### File Structure
 ```
 /
-├── server.py              # FastAPI backend
-├── config.json           # Channel configuration
+├── server.py              # FastAPI backend with PWA support
+├── config.json           # Enhanced channel configuration (dual feeds)
 ├── requirements.txt      # Python dependencies
 ├── static/
-│   └── index.html        # Complete frontend application
+│   ├── index.html        # Complete frontend application with PWA
+│   ├── manifest.json     # PWA web app manifest
+│   ├── sw.js            # Minimal service worker for PWA compliance
+│   └── icons/           # PWA application icons
+│       ├── icon-72x72.png
+│       ├── icon-96x96.png
+│       ├── icon-128x128.png
+│       ├── icon-144x144.png
+│       ├── icon-152x152.png
+│       ├── icon-192x192.png
+│       ├── icon-384x384.png
+│       └── icon-512x512.png
 ├── .github/
 │   └── workflows/
 │       └── keep-alive.yml # GitHub Actions keep-alive workflow
-└── TelegramUpdates.md    # This documentation
+└── TelegramUpdates.md    # This comprehensive documentation
 ```
+
+## Progressive Web App (PWA) Features
+
+### Installation Support
+- **Android**: "Add to Home Screen" creates standalone app experience
+- **iOS**: "Add to Home Screen" with custom icon and splash screen
+- **Desktop**: Chrome/Edge "Install App" option available
+- **Standalone Mode**: Runs without browser UI elements when installed
+
+### PWA Configuration
+- **Web App Manifest**: Complete metadata for installation
+- **Service Worker**: Minimal worker for PWA compliance (no offline caching)
+- **Meta Tags**: Comprehensive mobile and desktop PWA support
+- **Icons**: Full icon set (72px to 512px) for all platforms
+- **Theme Integration**: Consistent dark theme across installed app
+
+### Technical Implementation
+- **Manifest Serving**: Proper MIME type (`application/manifest+json`)
+- **Service Worker**: Minimal implementation for PWA recognition
+- **Icon Generation**: Automated icon creation from SVG template
+- **Mobile Optimization**: Viewport settings for full-screen experience
+
+## Management Interface
+
+### Channel Management
+- **Dual Feed Configuration**: Separate management for Main and Paz channels
+- **Dynamic Forms**: Add/remove channels with real-time UI updates
+- **Channel Validation**: URL format validation and normalization
+- **Bulk Operations**: Multiple channel management capabilities
+
+### Settings Management
+- **Refresh Interval**: Configurable auto-refresh timing (1-60 minutes)
+- **Max Posts**: Post limit configuration (5-100 posts)
+- **Scroll Speed**: Auto-scroll speed adjustment (10-200 pixels/second)
+- **Real-time Updates**: Immediate application of setting changes
+
+### Configuration Export/Import
+- **Download**: Export current configuration as JSON file
+- **Backup**: Complete configuration backup capability
+- **Restore**: Manual configuration restoration via file upload
+- **Version Control**: Configuration change tracking

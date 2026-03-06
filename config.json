@@ -9,6 +9,6 @@
     ""
   ],
   "refresh_interval_minutes": 5,
-  "max_posts": 20,
+  "max_posts": 30,
   "scroll_speed": 50
 }
