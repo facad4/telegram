@@ -158,6 +158,11 @@ async def get_config():
     }
 
 
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
+
 @app.get("/")
 async def root():
     return FileResponse(Path(__file__).parent / "static" / "index.html")
