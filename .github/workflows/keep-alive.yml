@@ -10,10 +10,27 @@ jobs:
   keep-alive:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping keep-alive endpoint
+      - name: Ping health endpoint
         run: |
-          curl -f https://telegram-y5ic.onrender.com/health || exit 1
-
-
-
-          
+          echo "Pinging health endpoint at $(date)"
+          response=$(curl -s -w "%{http_code}" -o /dev/null https://telegram-y5ic.onrender.com/health)
+          echo "HTTP Status Code: $response"
+          if [ "$response" = "200" ]; then
+            echo "✅ Service is alive and healthy"
+          else
+            echo "❌ Service returned status code: $response"
+            exit 1
+          fi
+      
+      - name: Ping main endpoint as backup
+        if: failure()
+        run: |
+          echo "Health endpoint failed, trying main endpoint..."
+          response=$(curl -s -w "%{http_code}" -o /dev/null https://telegram-y5ic.onrender.com/)
+          echo "Main endpoint HTTP Status Code: $response"
+          if [ "$response" = "200" ]; then
+            echo "✅ Main endpoint is responding"
+          else
+            echo "❌ Both endpoints failed"
+            exit 1
+          fi
