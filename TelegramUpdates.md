@@ -122,8 +122,8 @@ Downloads current `config.json` file.
 
 **Implementation**: Returns `config.json` as downloadable file attachment
 
-#### `GET /health`
-Health check endpoint returning `{"status": "ok"}`.
+#### `GET /health` and `HEAD /health`
+Health check endpoint returning `{"status": "ok"}`. Supports both GET and HEAD methods for efficient health monitoring and keep-alive services.
 
 #### `GET /`
 Serves the main application (`static/index.html`).
@@ -152,19 +152,20 @@ Serves the main application (`static/index.html`).
 
 #### Enhanced Navigation System
 - **Multi-View Interface**: Three distinct views accessible via header navigation
-  - **Main Feed**: Primary channel content (default view)
-  - **Paz Feed**: Secondary channel content (accessed via "P" link)
-  - **Management Interface**: Configuration and admin controls (⚙️ icon)
-- **Navigation Links**: Horizontal navigation with active state indicators
+  - **Main Feed**: Primary channel content (default view, "Main" link on left)
+  - **Paz Feed**: Secondary channel content ("P" link on top-right)
+  - **Management Interface**: Configuration and admin controls (⚙️ icon on top-right)
+- **Navigation Layout**: Streamlined header without logo
+  - **Left side**: Main navigation link + control buttons
+  - **Right side**: Filter bar, status, Paz link, settings icon
 - **Context-Aware UI**: Different controls shown based on current view
 
 #### Layout Structure
-- **Header**: Fixed 44px height with enhanced navigation and controls
+- **Header**: Fixed 44px height with streamlined navigation and controls
   - **Horizontally Scrollable**: Entire header scrolls when content overflows
-  - **Navigation Links**: Main, Paz ("P"), and Management (⚙️)
-  - **Control Buttons**: Manual sync and sort order toggle
-  - **Scrollable Filter Bar**: Channel filter buttons with horizontal scroll
-  - **Status Indicator**: Loading states and last update time
+  - **Left Section**: "Main" navigation + Control buttons (sync, sort, stop/resume scrolling)
+  - **Right Section**: Scrollable filter bar + Status indicator + "P" link + Settings (⚙️)
+  - **No Logo**: Clean, minimalist design without branding elements
 - **Viewport**: Flex-grow scrollable area with thin scrollbars
 - **Cards**: Responsive layout adapting to screen orientation
   - **Desktop/Landscape**: Horizontal layout with media side (40% width, max 500px)
@@ -178,7 +179,7 @@ Serves the main application (`static/index.html`).
   - Media appears above text content
   - Reduced text sizes for mobile readability
 - **Typography Scaling**:
-  - Post text: 2rem → 1.2rem
+  - Post text: 1.4rem → 1rem (reduced from original 2rem for better readability)
   - Channel names: 1.3rem → 1rem
   - Metadata: 1rem → 0.9rem
 - **Spacing Optimization**:
@@ -190,6 +191,7 @@ Serves the main application (`static/index.html`).
 - **Engine**: `requestAnimationFrame` with delta-time calculations
 - **Speed**: Configurable pixels per second from API config
 - **Direction**: Top to bottom (newest posts first)
+- **Manual Control**: Stop/Resume button for user control over auto-scrolling
 - **Loop behavior**: 
   - Scroll to bottom → pause 3 seconds → reset to top
   - Initial 2-second pause before starting
@@ -197,9 +199,10 @@ Serves the main application (`static/index.html`).
   - Mouse wheel: 4-second pause
   - Touch start/end: 4-second pause
   - Manual scroll detection via event listeners
+  - Stop/Resume button: Complete user control
 
 #### Typography Scale
-- **Post text**: 2rem, line-height 1.55
+- **Post text**: 1.4rem, line-height 1.55 (reduced from 2rem for better readability)
 - **Channel names**: 1.3rem, font-weight 600
 - **Metadata**: 1rem (dates, views)
 - **Link previews**: 1.15rem titles, 1.05rem descriptions
@@ -210,8 +213,8 @@ Serves the main application (`static/index.html`).
 - **Channel links**: Click to open channel page (event propagation stopped)
 - **Link previews**: Click to open external links
 - **Filter buttons**: Toggle between "All" and individual channels
-- **Control buttons**: Manual sync and sort order toggle
-- **Navigation links**: Switch between Main, Paz, and Management views
+- **Control buttons**: Manual sync, sort order toggle, and stop/resume scrolling
+- **Navigation links**: Switch between Main (left), Paz (top-right), and Management (top-right) views
 - **Hover effects**: Border color changes, text color transitions
 
 #### Enhanced Control System
@@ -225,6 +228,11 @@ Serves the main application (`static/index.html`).
   - Visual indicator showing current sort mode ("New"/"Old")
   - Instant re-sorting without network requests
   - Tooltip shows current sort state
+- **Stop/Resume Scrolling Button**:
+  - Complete user control over auto-scrolling behavior
+  - Toggle between "Stop" and "Resume" states
+  - Visual indicator with dynamic icon (stop/play)
+  - Immediate response without page refresh
 
 #### Channel Filtering System
 - **UI**: Horizontally scrollable filter bar in header
@@ -436,6 +444,7 @@ beautifulsoup4     # HTML parsing for post extraction
 - `downloadConfig()`: Configuration file download
 - `manualSync()`: Manual post refresh with loading states
 - `toggleSortOrder()`: Client-side post sorting toggle
+- `toggleStopScrolling()`: Stop/resume auto-scrolling control
 - `formatDate(isoStr)`: Relative time formatting
 - `sanitizeHtml(html)`: XSS prevention for post content
 
@@ -504,3 +513,4 @@ beautifulsoup4     # HTML parsing for post extraction
 - **Backup**: Complete configuration backup capability
 - **Restore**: Manual configuration restoration via file upload
 - **Version Control**: Configuration change tracking
+uvicorn server:app --host 10.100.102.9 --port 8000 --reload
