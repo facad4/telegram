@@ -204,6 +204,29 @@ async def download_config():
     )
 
 
+@app.get("/static/manifest.json")
+async def get_manifest():
+    manifest_path = Path(__file__).parent / "static" / "manifest.json"
+    return FileResponse(
+        manifest_path,
+        media_type="application/manifest+json",
+        headers={"Cache-Control": "public, max-age=3600"}
+    )
+
+
+@app.get("/static/sw.js")
+async def get_service_worker():
+    sw_path = Path(__file__).parent / "static" / "sw.js"
+    return FileResponse(
+        sw_path,
+        media_type="application/javascript",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Service-Worker-Allowed": "/"
+        }
+    )
+
+
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}

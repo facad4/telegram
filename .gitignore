@@ -3,3 +3,10 @@ __pycache__/
 *.pyc
 .git/
 push.txt
+
+# Icon generation scripts and temporary files
+generate_icons.py
+create_simple_icons.py
+test_pwa.py
+icon_env/
+PWA_README.md
