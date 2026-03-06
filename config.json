@@ -1,5 +1,13 @@
 {
-  "channels": ["https://t.me/abualiexpress", "https://t.me/ziv710", "https://t.me/alexmehacarmel"],
+  "channels": [
+    "https://t.me/abualiexpress",
+    "https://t.me/ziv710",
+    "https://t.me/alexmehacarmel"
+  ],
+  "paz_channels": [
+    "https://t.me/abualiexpress",
+    ""
+  ],
   "refresh_interval_minutes": 5,
   "max_posts": 20,
   "scroll_speed": 50

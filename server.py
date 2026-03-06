@@ -6,7 +6,7 @@ from pathlib import Path
 
 import httpx
 from bs4 import BeautifulSoup
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -156,6 +156,52 @@ async def get_config():
         "refresh_interval_minutes": config.get("refresh_interval_minutes", 5),
         "scroll_speed": config.get("scroll_speed", 50),
     }
+
+
+@app.get("/api/paz/posts")
+async def get_paz_posts():
+    config = load_config()
+    channels = [normalize_channel(ch) for ch in config.get("paz_channels", [])]
+    max_posts = config.get("max_posts", 20)
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        results = await asyncio.gather(
+            *[fetch_channel_html(client, ch) for ch in channels]
+        )
+
+    all_posts = []
+    for ch, html in zip(channels, results):
+        if html:
+            all_posts.extend(parse_channel_posts(html, ch))
+
+    all_posts.sort(key=lambda p: p["datetime"], reverse=True)
+    return all_posts[:max_posts]
+
+
+@app.get("/api/admin/config")
+async def get_full_config():
+    return load_config()
+
+
+@app.post("/api/admin/config")
+async def update_config(request: Request):
+    try:
+        config_data = await request.json()
+        with open(CONFIG_PATH, 'w') as f:
+            json.dump(config_data, f, indent=2)
+        return {"status": "success", "message": "Configuration updated"}
+    except Exception as e:
+        logger.error("Failed to update config: %s", e)
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/admin/config/download")
+async def download_config():
+    return FileResponse(
+        CONFIG_PATH,
+        media_type="application/json",
+        filename="config.json"
+    )
 
 
 @app.get("/health")

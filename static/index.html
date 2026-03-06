@@ -380,6 +380,144 @@
         height: 48px;
       }
     }
+
+    /* Management Interface Styles */
+    .nav-links {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+    }
+
+    .nav-link {
+      color: var(--text-secondary);
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 1rem;
+      padding: 6px 12px;
+      border-radius: 8px;
+      transition: all 0.2s;
+    }
+
+    .nav-link:hover, .nav-link.active {
+      color: var(--accent);
+      background: var(--accent-light);
+    }
+
+    .management-container {
+      display: none;
+      padding: 20px;
+      background: var(--card-bg);
+      border-radius: var(--radius);
+      margin: 20px;
+      border: 1px solid var(--border);
+    }
+
+    .management-section {
+      margin-bottom: 30px;
+    }
+
+    .management-section h3 {
+      color: var(--accent);
+      margin-bottom: 15px;
+      font-size: 1.2rem;
+    }
+
+    .channel-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 15px;
+    }
+
+    .channel-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      background: var(--bg);
+      border-radius: 6px;
+      border: 1px solid var(--border);
+    }
+
+    .channel-item input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      color: var(--text);
+      font-size: 0.9rem;
+    }
+
+    .channel-item input:focus {
+      outline: none;
+    }
+
+    .remove-btn {
+      background: #ef5350;
+      color: white;
+      border: none;
+      padding: 4px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.8rem;
+    }
+
+    .remove-btn:hover {
+      background: #d32f2f;
+    }
+
+    .add-btn, .save-btn, .download-btn {
+      background: var(--accent);
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      margin-right: 10px;
+    }
+
+    .add-btn:hover, .save-btn:hover, .download-btn:hover {
+      background: #1976d2;
+    }
+
+    .config-actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 20px;
+    }
+
+    .settings-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 15px;
+      margin-bottom: 20px;
+    }
+
+    .setting-item {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .setting-item label {
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+      font-weight: 500;
+    }
+
+    .setting-item input {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 8px 10px;
+      color: var(--text);
+      font-size: 0.9rem;
+    }
+
+    .setting-item input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
   </style>
 </head>
 <body>
@@ -388,6 +526,11 @@
       <svg viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12s5.37 12 12 12 12-5.37 12-12S18.63 0 12 0zm5.53 8.15l-1.67 7.87c-.12.56-.45.7-.91.44l-2.52-1.86-1.22 1.17c-.13.13-.25.25-.51.25l.18-2.57 4.67-4.22c.2-.18-.04-.28-.32-.1l-5.77 3.64-2.49-.78c-.54-.17-.55-.54.11-.8l9.73-3.75c.45-.17.85.11.72.81z"/></svg>
       Channel Updates
     </h1>
+    <div class="nav-links">
+      <a href="#" class="nav-link active" id="mainFeedLink">Main</a>
+      <a href="#" class="nav-link" id="pazFeedLink">P</a>
+      <a href="#" class="nav-link" id="managementLink">⚙️</a>
+    </div>
     <div class="header-right">
       <div class="filter-bar" id="filterBar"></div>
       <div class="status">
@@ -406,6 +549,43 @@
     </div>
   </div>
 
+  <div class="management-container" id="managementContainer">
+    <div class="management-section">
+      <h3>Main Feed Channels</h3>
+      <div class="channel-list" id="mainChannelList"></div>
+      <button class="add-btn" onclick="addChannel('main')">Add Channel</button>
+    </div>
+
+    <div class="management-section">
+      <h3>Paz Feed Channels</h3>
+      <div class="channel-list" id="pazChannelList"></div>
+      <button class="add-btn" onclick="addChannel('paz')">Add Channel</button>
+    </div>
+
+    <div class="management-section">
+      <h3>Settings</h3>
+      <div class="settings-grid">
+        <div class="setting-item">
+          <label>Refresh Interval (minutes)</label>
+          <input type="number" id="refreshInterval" min="1" max="60">
+        </div>
+        <div class="setting-item">
+          <label>Max Posts</label>
+          <input type="number" id="maxPosts" min="5" max="100">
+        </div>
+        <div class="setting-item">
+          <label>Scroll Speed</label>
+          <input type="number" id="scrollSpeed" min="10" max="200">
+        </div>
+      </div>
+    </div>
+
+    <div class="config-actions">
+      <button class="save-btn" onclick="saveConfiguration()">Save Configuration</button>
+      <button class="download-btn" onclick="downloadConfig()">Download Config</button>
+    </div>
+  </div>
+
   <script>
     let allPosts = [];
     let activeFilter = null;
@@ -414,6 +594,8 @@
     let scrollSpeed = 50;
     let scrollAnimId = null;
     let paused = false;
+    let currentView = 'main'; // 'main', 'paz', or 'management'
+    let fullConfig = {};
 
     async function fetchConfig() {
       try {
@@ -617,11 +799,176 @@
       startScrolling();
     }
 
+    // Navigation functions
+    function showView(view) {
+      currentView = view;
+      
+      // Update nav links
+      document.querySelectorAll('.nav-link').forEach(link => link.classList.remove('active'));
+      
+      if (view === 'main') {
+        document.getElementById('mainFeedLink').classList.add('active');
+        document.getElementById('scrollViewport').style.display = 'flex';
+        document.getElementById('managementContainer').style.display = 'none';
+        fetchPosts();
+      } else if (view === 'paz') {
+        document.getElementById('pazFeedLink').classList.add('active');
+        document.getElementById('scrollViewport').style.display = 'flex';
+        document.getElementById('managementContainer').style.display = 'none';
+        fetchPazPosts();
+      } else if (view === 'management') {
+        document.getElementById('managementLink').classList.add('active');
+        document.getElementById('scrollViewport').style.display = 'none';
+        document.getElementById('managementContainer').style.display = 'block';
+        loadManagementInterface();
+      }
+    }
+
+    async function fetchPazPosts() {
+      const dot = document.getElementById('statusDot');
+      const text = document.getElementById('statusText');
+      dot.classList.add('loading');
+      text.textContent = 'Loading Paz feed...';
+
+      try {
+        const resp = await fetch('/api/paz/posts');
+        if (!resp.ok) throw new Error('Failed');
+        allPosts = await resp.json();
+        renderFilters();
+        renderPosts();
+        const now = new Date();
+        text.textContent = `Paz feed updated ${now.toLocaleTimeString()}`;
+        dot.classList.remove('loading');
+      } catch (e) {
+        dot.classList.remove('loading');
+        dot.style.background = '#ef5350';
+        text.textContent = 'Error loading Paz feed';
+        document.getElementById('postsContainer').innerHTML =
+          '<div class="error-msg">Failed to load Paz posts. Will retry on next refresh.</div>';
+      }
+    }
+
+    // Management interface functions
+    async function loadManagementInterface() {
+      try {
+        const resp = await fetch('/api/admin/config');
+        fullConfig = await resp.json();
+        
+        renderChannelList('main', fullConfig.channels || []);
+        renderChannelList('paz', fullConfig.paz_channels || []);
+        
+        document.getElementById('refreshInterval').value = fullConfig.refresh_interval_minutes || 5;
+        document.getElementById('maxPosts').value = fullConfig.max_posts || 20;
+        document.getElementById('scrollSpeed').value = fullConfig.scroll_speed || 50;
+      } catch (e) {
+        console.error('Failed to load configuration:', e);
+      }
+    }
+
+    function renderChannelList(type, channels) {
+      const container = document.getElementById(type === 'main' ? 'mainChannelList' : 'pazChannelList');
+      container.innerHTML = channels.map((channel, index) => `
+        <div class="channel-item">
+          <input type="text" value="${channel}" onchange="updateChannel('${type}', ${index}, this.value)">
+          <button class="remove-btn" onclick="removeChannel('${type}', ${index})">Remove</button>
+        </div>
+      `).join('');
+    }
+
+    function addChannel(type) {
+      const channels = type === 'main' ? (fullConfig.channels || []) : (fullConfig.paz_channels || []);
+      channels.push('');
+      
+      if (type === 'main') {
+        fullConfig.channels = channels;
+      } else {
+        fullConfig.paz_channels = channels;
+      }
+      
+      renderChannelList(type, channels);
+    }
+
+    function removeChannel(type, index) {
+      const channels = type === 'main' ? (fullConfig.channels || []) : (fullConfig.paz_channels || []);
+      channels.splice(index, 1);
+      
+      if (type === 'main') {
+        fullConfig.channels = channels;
+      } else {
+        fullConfig.paz_channels = channels;
+      }
+      
+      renderChannelList(type, channels);
+    }
+
+    function updateChannel(type, index, value) {
+      const channels = type === 'main' ? (fullConfig.channels || []) : (fullConfig.paz_channels || []);
+      channels[index] = value;
+      
+      if (type === 'main') {
+        fullConfig.channels = channels;
+      } else {
+        fullConfig.paz_channels = channels;
+      }
+    }
+
+    async function saveConfiguration() {
+      // Update config with current form values
+      fullConfig.refresh_interval_minutes = parseInt(document.getElementById('refreshInterval').value);
+      fullConfig.max_posts = parseInt(document.getElementById('maxPosts').value);
+      fullConfig.scroll_speed = parseInt(document.getElementById('scrollSpeed').value);
+
+      try {
+        const resp = await fetch('/api/admin/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(fullConfig)
+        });
+        
+        const result = await resp.json();
+        if (result.status === 'success') {
+          alert('Configuration saved successfully!');
+          // Reload config for the main app
+          await fetchConfig();
+        } else {
+          alert('Failed to save configuration: ' + result.message);
+        }
+      } catch (e) {
+        alert('Failed to save configuration: ' + e.message);
+      }
+    }
+
+    function downloadConfig() {
+      window.open('/api/admin/config/download', '_blank');
+    }
+
     async function init() {
+      // Set up navigation event listeners
+      document.getElementById('mainFeedLink').addEventListener('click', (e) => {
+        e.preventDefault();
+        showView('main');
+      });
+      
+      document.getElementById('pazFeedLink').addEventListener('click', (e) => {
+        e.preventDefault();
+        showView('paz');
+      });
+      
+      document.getElementById('managementLink').addEventListener('click', (e) => {
+        e.preventDefault();
+        showView('management');
+      });
+
       await fetchConfig();
       await fetchPosts();
       if (refreshTimer) clearInterval(refreshTimer);
-      refreshTimer = setInterval(fetchPosts, refreshMs);
+      refreshTimer = setInterval(() => {
+        if (currentView === 'main') {
+          fetchPosts();
+        } else if (currentView === 'paz') {
+          fetchPazPosts();
+        }
+      }, refreshMs);
     }
 
     init();
