@@ -39,8 +39,25 @@
       align-items: center;
       padding: 0 20px;
       flex-shrink: 0;
-      justify-content: space-between;
+      gap: 16px;
       z-index: 10;
+      overflow-x: auto;
+      overflow-y: hidden;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+
+    .header::-webkit-scrollbar {
+      height: 3px;
+    }
+
+    .header::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .header::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 2px;
     }
 
     .header h1 {
@@ -50,6 +67,8 @@
       display: flex;
       align-items: center;
       gap: 8px;
+      white-space: nowrap;
+      flex-shrink: 0;
     }
 
     .header h1 svg { width: 20px; height: 20px; fill: var(--accent); }
@@ -58,9 +77,37 @@
       display: flex;
       align-items: center;
       gap: 14px;
+      white-space: nowrap;
+      flex-shrink: 0;
+      margin-left: auto;
     }
 
-    .filter-bar { display: flex; gap: 5px; }
+    .filter-bar { 
+      display: flex; 
+      gap: 5px; 
+      overflow-x: auto;
+      overflow-y: hidden;
+      flex-wrap: nowrap;
+      max-width: 500px;
+      padding: 2px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+      scroll-behavior: smooth;
+      flex-shrink: 1;
+    }
+
+    .filter-bar::-webkit-scrollbar {
+      height: 4px;
+    }
+
+    .filter-bar::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .filter-bar::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 2px;
+    }
 
     .filter-btn {
       padding: 4px 12px;
@@ -336,6 +383,10 @@
         font-size: 0.9rem;
       }
 
+      .filter-bar {
+        max-width: 250px;
+      }
+
       .filter-btn {
         font-size: 0.8rem;
         padding: 3px 10px;
@@ -379,6 +430,42 @@
         width: 48px;
         height: 48px;
       }
+
+      /* Management container mobile adjustments */
+      .management-container {
+        margin: 10px;
+        padding: 15px;
+        max-height: calc(100vh - 80px);
+        border-radius: 8px;
+      }
+
+      .management-section {
+        margin-bottom: 20px;
+      }
+
+      .management-section h3 {
+        font-size: 1.1rem;
+        margin-bottom: 12px;
+      }
+
+      .settings-grid {
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+
+      .config-actions {
+        position: sticky;
+        bottom: 0;
+        background: var(--card-bg);
+        padding: 15px 0 0 0;
+        border-top: 1px solid var(--border);
+        margin-top: 20px;
+      }
+
+      .add-btn, .save-btn, .download-btn {
+        font-size: 0.9rem;
+        padding: 10px 16px;
+      }
     }
 
     /* Management Interface Styles */
@@ -386,6 +473,8 @@
       display: flex;
       gap: 16px;
       align-items: center;
+      white-space: nowrap;
+      flex-shrink: 0;
     }
 
     .nav-link {
@@ -410,6 +499,23 @@
       border-radius: var(--radius);
       margin: 20px;
       border: 1px solid var(--border);
+      max-height: calc(100vh - 100px);
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+
+    .management-container::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .management-container::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .management-container::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 3px;
     }
 
     .management-section {
