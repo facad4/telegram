@@ -2,15 +2,17 @@ import asyncio
 import json
 import logging
 import re
+import secrets
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
+import jwt
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from database import Database
@@ -19,6 +21,21 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+JWT_SECRET = secrets.token_hex(32)
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_DAYS = 30
+
+
+async def require_auth(request: Request):
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    token = auth.removeprefix("Bearer ")
+    try:
+        jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
 @asynccontextmanager
@@ -29,6 +46,10 @@ async def lifespan(app: FastAPI):
     logger.info("Found %d users in database:", len(users))
     for user in users:
         logger.info("  User: %s (created: %s)", user.get("user_name"), user.get("created_at"))
+    feeds = await db.get_all_feeds()
+    logger.info("Found %d feeds in database:", len(feeds))
+    for feed in feeds:
+        logger.info("  Feed: user_id=%s, url=%s", feed.get("user_id"), feed.get("feed_url"))
     yield
 
 
@@ -161,7 +182,31 @@ def parse_channel_posts(html: str, channel: str) -> list[dict]:
     return posts
 
 
-@app.get("/api/posts")
+@app.post("/api/login")
+async def login(request: Request):
+    body = await request.json()
+    user_name = body.get("user_name", "")
+    password = body.get("password", "")
+    db: Database = request.app.state.db
+    user = await db.authenticate_user(user_name, password)
+    if not user:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Login failed, incorrect credentials"},
+        )
+    token = jwt.encode(
+        {
+            "user_name": user["user_name"],
+            "exp": datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRY_DAYS),
+        },
+        JWT_SECRET,
+        algorithm=JWT_ALGORITHM,
+    )
+    logger.info("User '%s' logged in successfully", user["user_name"])
+    return {"token": token, "user_name": user["user_name"]}
+
+
+@app.get("/api/posts", dependencies=[Depends(require_auth)])
 async def get_posts():
     config = load_config()
     channels = [normalize_channel(ch) for ch in config.get("channels", [])]
@@ -181,7 +226,7 @@ async def get_posts():
     return all_posts[:max_posts]
 
 
-@app.get("/api/config")
+@app.get("/api/config", dependencies=[Depends(require_auth)])
 async def get_config():
     config = load_config()
     return {
@@ -190,7 +235,7 @@ async def get_config():
     }
 
 
-@app.get("/api/paz/posts")
+@app.get("/api/paz/posts", dependencies=[Depends(require_auth)])
 async def get_paz_posts():
     config = load_config()
     channels = [normalize_channel(ch) for ch in config.get("paz_channels", [])]
@@ -210,14 +255,14 @@ async def get_paz_posts():
     return all_posts[:max_posts]
 
 
-@app.get("/api/saved")
+@app.get("/api/saved", dependencies=[Depends(require_auth)])
 async def get_saved_posts():
     posts = load_saved_posts()
     posts.sort(key=lambda p: p.get("saved_at", p.get("datetime", "")), reverse=True)
     return posts
 
 
-@app.post("/api/saved")
+@app.post("/api/saved", dependencies=[Depends(require_auth)])
 async def save_post(request: Request):
     try:
         post = await request.json()
@@ -234,7 +279,7 @@ async def save_post(request: Request):
         return {"status": "error", "message": str(e)}
 
 
-@app.delete("/api/saved/{channel}/{post_id}")
+@app.delete("/api/saved/{channel}/{post_id}", dependencies=[Depends(require_auth)])
 async def unsave_post(channel: str, post_id: str):
     try:
         posts = load_saved_posts()
@@ -246,12 +291,12 @@ async def unsave_post(channel: str, post_id: str):
         return {"status": "error", "message": str(e)}
 
 
-@app.get("/api/admin/config")
+@app.get("/api/admin/config", dependencies=[Depends(require_auth)])
 async def get_full_config():
     return load_config()
 
 
-@app.post("/api/admin/config")
+@app.post("/api/admin/config", dependencies=[Depends(require_auth)])
 async def update_config(request: Request):
     try:
         config_data = await request.json()
@@ -263,7 +308,7 @@ async def update_config(request: Request):
         return {"status": "error", "message": str(e)}
 
 
-@app.get("/api/admin/config/download")
+@app.get("/api/admin/config/download", dependencies=[Depends(require_auth)])
 async def download_config():
     return FileResponse(
         CONFIG_PATH,

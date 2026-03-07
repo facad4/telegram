@@ -21,3 +21,17 @@ class Database:
     async def get_all_users(self) -> list[dict]:
         response = await self.client.table("Users").select("*").execute()
         return response.data
+
+    async def get_all_feeds(self) -> list[dict]:
+        response = await self.client.table("Feeds").select("*").execute()
+        return response.data
+
+    async def authenticate_user(self, user_name: str, password: str) -> dict | None:
+        response = (
+            await self.client.table("Users")
+            .select("*")
+            .eq("user_name", user_name)
+            .eq("User_password", password)
+            .execute()
+        )
+        return response.data[0] if response.data else None

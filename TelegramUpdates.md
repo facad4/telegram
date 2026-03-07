@@ -5,9 +5,11 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 ## Architecture
 
 - **Backend**: FastAPI server (`server.py`) that scrapes public Telegram channel pages (`t.me/s/<channel>`)
+- **Database**: Supabase (PostgreSQL) via async Python SDK, encapsulated in `database.py`
 - **Frontend**: Single-page vanilla HTML/CSS/JavaScript application (`static/index.html`) with auto-scrolling tiles
 - **Configuration**: JSON-based channel configuration (`config.json`)
-- **Dependencies**: FastAPI, httpx, BeautifulSoup4 (see `requirements.txt`)
+- **Environment**: `.env` file for secrets (`SUPABASE_URL`, `SUPABASE_KEY`) loaded via `python-dotenv`
+- **Dependencies**: FastAPI, httpx, BeautifulSoup4, supabase, python-dotenv (see `requirements.txt`)
 
 ## Core Features
 
@@ -254,10 +256,11 @@ Serves the main application (`static/index.html`).
 ### 5. Enhanced Data Flow
 
 #### Initialization and Configuration
-1. **Startup**: `init()` function initializes multi-view interface
-2. **Event Listeners**: Set up navigation, control buttons, and PWA service worker
-3. **Configuration**: Fetch `/api/config` to get `refresh_interval_minutes` and `scroll_speed`
-4. **Default View**: Load Main feed as default view
+1. **Server Lifespan**: `load_dotenv()` loads `.env`, then the lifespan handler initializes `Database` and logs all users
+2. **Frontend Startup**: `init()` function initializes multi-view interface
+3. **Event Listeners**: Set up navigation, control buttons, and PWA service worker
+4. **Configuration**: Fetch `/api/config` to get `refresh_interval_minutes` and `scroll_speed`
+5. **Default View**: Load Main feed as default view
 
 #### Multi-View Data Management
 - **View Switching**: `showView(view)` function manages interface state
@@ -289,7 +292,36 @@ Serves the main application (`static/index.html`).
 3. **Installation**: Support for "Add to Home Screen" functionality
 4. **Standalone Mode**: Full-screen experience without browser UI
 
-### 6. Deployment Configuration
+### 6. Database Layer (`database.py`)
+
+#### Supabase Integration
+- **SDK**: Supabase Python SDK (async client via `supabase._async.client`)
+- **Authentication**: `SUPABASE_URL` and `SUPABASE_KEY` environment variables (loaded from `.env`)
+- **Client Type**: `AsyncClient` for non-blocking use in async request handlers
+- **Initialization**: Async factory method `Database.create()` (since `create_client()` is async)
+- **Instance Access**: Stored on `app.state.db`, accessible in endpoints via `request.app.state.db`
+
+#### Database Schema
+
+##### `Users` Table
+| Column         | Type                     | Description          |
+|----------------|--------------------------|----------------------|
+| `id`           | bigint                   | Primary key          |
+| `created_at`   | timestamp with time zone | Row creation time    |
+| `user_name`    | text                     | Username             |
+| `User_password`| text                     | User password        |
+
+- **RLS**: Row Level Security is enabled; a SELECT policy is required for the API key to read rows
+
+#### Database Class API
+- `Database.create() -> Database` (async classmethod): Initializes the async Supabase client and returns a `Database` instance
+- `get_all_users() -> list[dict]` (async): Queries all rows from the `Users` table
+
+#### Startup Behavior
+- On server startup (via FastAPI lifespan), the `Database` is initialized and all users are fetched and logged
+- Passwords are excluded from log output for security; only `user_name` and `created_at` are logged
+
+### 7. Deployment Configuration
 
 #### Docker (Hugging Face Spaces)
 - **Base image**: `python:3.13-slim`
@@ -327,11 +359,13 @@ Serves the main application (`static/index.html`).
           run: curl -f https://your-app.onrender.com/health || exit 1
   ```
 
-### 7. Dependencies (`requirements.txt`)
+### 8. Dependencies (`requirements.txt`)
 ```
 fastapi[standard]  # Web framework with built-in ASGI server
 httpx              # Async HTTP client for Telegram scraping
 beautifulsoup4     # HTML parsing for post extraction
+supabase           # Supabase Python SDK (async client for PostgreSQL)
+python-dotenv      # Load environment variables from .env file
 ```
 
 **Key imports in `server.py`**:
@@ -340,7 +374,10 @@ beautifulsoup4     # HTML parsing for post extraction
 - `logging` - Request/error logging
 - `re` - Image URL extraction from CSS
 - `pathlib.Path` - File path handling
+- `contextlib.asynccontextmanager` - FastAPI lifespan management
 - `fastapi` - Web framework, responses, static files
+- `dotenv.load_dotenv` - Environment variable loading
+- `database.Database` - Supabase database abstraction
 
 ## Technical Specifications
 
@@ -369,6 +406,8 @@ beautifulsoup4     # HTML parsing for post extraction
 - **CORS**: Not required (same-origin requests)
 - **Rate limiting**: None implemented (relies on Telegram's rate limiting)
 - **User-Agent spoofing**: Uses Chrome UA to avoid bot detection
+- **Supabase credentials**: Stored in `.env` file (excluded from git via `.gitignore`); loaded at runtime via `python-dotenv`
+- **Password logging**: User passwords are intentionally excluded from startup log output
 
 ### Browser Compatibility
 - **Target browsers**: Modern browsers with ES2017+ support
@@ -418,17 +457,23 @@ beautifulsoup4     # HTML parsing for post extraction
 8. **Keep-alive dependency**: Render.com free tier requires external pinging to prevent sleep
 9. **PWA offline limitations**: No offline functionality - requires internet connection
 10. **Configuration persistence**: Management interface changes persist immediately but require page refresh for some settings
+11. **Supabase RLS**: Row Level Security must have a SELECT policy for the API key to read the `Users` table
 
 ## Implementation Details
 
 ### Key Functions
 
 #### Backend (`server.py`)
+- `lifespan(app)`: Async context manager that initializes `Database` and logs users at startup
 - `normalize_channel(raw: str) -> str`: Extracts channel name from various URL formats
 - `fetch_channel_html(client, channel) -> str | None`: Async HTTP request with error handling
 - `extract_image_url(style: str) -> str | None`: Regex extraction from CSS `url()` values
 - `parse_channel_posts(html: str, channel: str) -> list[dict]`: BeautifulSoup parsing logic
 - `load_config() -> dict`: JSON config file loader
+
+#### Database (`database.py`)
+- `Database.create() -> Database`: Async factory that initializes the Supabase async client
+- `Database.get_all_users() -> list[dict]`: Fetches all rows from the `Users` table
 
 #### Frontend (`static/index.html`)
 - `fetchConfig()`: Loads client settings from `/api/config`
@@ -451,8 +496,10 @@ beautifulsoup4     # HTML parsing for post extraction
 ### File Structure
 ```
 /
-├── server.py              # FastAPI backend with PWA support
+├── server.py              # FastAPI backend with PWA support and Supabase lifespan
+├── database.py           # Database class encapsulating Supabase async client
 ├── config.json           # Enhanced channel configuration (dual feeds)
+├── .env                  # Environment variables (SUPABASE_URL, SUPABASE_KEY)
 ├── requirements.txt      # Python dependencies
 ├── static/
 │   ├── index.html        # Complete frontend application with PWA

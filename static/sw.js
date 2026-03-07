@@ -11,8 +11,6 @@ self.addEventListener('activate', function(event) {
   event.waitUntil(self.clients.claim());
 });
 
-// Pass through all fetch requests without caching
-self.addEventListener('fetch', function(event) {
-  // Just pass through to network - no caching
-  event.respondWith(fetch(event.request));
-});
+// No fetch handler -- let all requests pass through to the network naturally.
+// Intercepting with event.respondWith(fetch(event.request)) can strip
+// Authorization headers on some browsers (especially mobile).
