@@ -2,19 +2,37 @@ import asyncio
 import json
 import logging
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from database import Database
+
+load_dotenv()
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db = await Database.create()
+    app.state.db = db
+    users = await db.get_all_users()
+    logger.info("Found %d users in database:", len(users))
+    for user in users:
+        logger.info("  User: %s (created: %s)", user.get("user_name"), user.get("created_at"))
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 SAVED_POSTS_PATH = Path(__file__).parent / "saved_posts.json"
