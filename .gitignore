@@ -10,3 +10,4 @@ create_simple_icons.py
 test_pwa.py
 icon_env/
 PWA_README.md
+start.sh

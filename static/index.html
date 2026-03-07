@@ -726,6 +726,36 @@
       outline: none;
       border-color: var(--accent);
     }
+
+    .save-btn {
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      padding: 4px;
+      color: var(--text-secondary);
+      transition: color 0.15s, transform 0.15s;
+      display: flex;
+      align-items: center;
+    }
+
+    .save-btn:hover {
+      color: #ffc107;
+      transform: scale(1.15);
+    }
+
+    .save-btn.saved {
+      color: #ffc107;
+    }
+
+    .save-btn svg {
+      width: 20px;
+      height: 20px;
+      fill: currentColor;
+    }
+
+    a.control-btn {
+      text-decoration: none;
+    }
   </style>
 </head>
 <body>
@@ -751,6 +781,9 @@
         </svg>
         <span id="stopScrollText">Stop</span>
       </button>
+      <a href="#" class="control-btn" id="savedFeedLink" title="Saved posts">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M17 3H7c-1.1 0-2 .9-2 2v16l7-3 7 3V5c0-1.1-.9-2-2-2z"/></svg>
+      </a>
     </div>
     <div class="header-right">
       <div class="filter-bar" id="filterBar"></div>
@@ -817,11 +850,12 @@
     let scrollSpeed = 50;
     let scrollAnimId = null;
     let paused = false;
-    let currentView = 'main'; // 'main', 'paz', or 'management'
+    let currentView = 'main'; // 'main', 'paz', 'saved', or 'management'
     let fullConfig = {};
-    let sortNewestFirst = true; // true = newest first, false = oldest first
+    let sortNewestFirst = true;
     let isManualRefreshing = false;
     let isScrollingStopped = false;
+    let savedPostIds = new Set();
 
     async function fetchConfig() {
       try {
@@ -1003,6 +1037,11 @@
             </a>`;
         }
 
+        const saveKey = `${post.channel}/${post.post_id}`;
+        const isSaved = savedPostIds.has(saveKey);
+        const bookmarkOutline = `<svg viewBox="0 0 24 24"><path d="M17 3H7c-1.1 0-2 .9-2 2v16l7-3 7 3V5c0-1.1-.9-2-2-2zm0 15l-5-2.18L7 18V5h10v13z"/></svg>`;
+        const bookmarkFilled = `<svg viewBox="0 0 24 24"><path d="M17 3H7c-1.1 0-2 .9-2 2v16l7-3 7 3V5c0-1.1-.9-2-2-2z"/></svg>`;
+
         return `
           <div class="post-card" onclick="window.open('${post.post_url}','_blank')">
             ${mediaSideHtml}
@@ -1023,6 +1062,9 @@
                   <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
                   ${post.views}
                 </div>
+                <button class="save-btn ${isSaved ? 'saved' : ''}" data-channel="${post.channel}" data-postid="${post.post_id}" onclick="event.stopPropagation(); toggleSave(this)" title="${isSaved ? 'Remove from saved' : 'Save for later'}">
+                  ${isSaved ? bookmarkFilled : bookmarkOutline}
+                </button>
                 <a class="post-open-link" href="${post.post_url}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Open in Telegram</a>
               </div>
             </div>
@@ -1057,6 +1099,13 @@
         controlButtons.style.display = 'flex';
         filterBar.style.display = 'flex';
         fetchPazPosts();
+      } else if (view === 'saved') {
+        document.getElementById('savedFeedLink').classList.add('active');
+        document.getElementById('scrollViewport').style.display = 'flex';
+        document.getElementById('managementContainer').style.display = 'none';
+        controlButtons.style.display = 'flex';
+        filterBar.style.display = 'flex';
+        fetchSavedPosts();
       } else if (view === 'management') {
         document.getElementById('managementLink').classList.add('active');
         document.getElementById('scrollViewport').style.display = 'none';
@@ -1088,6 +1137,71 @@
         text.textContent = 'Error loading Paz feed';
         document.getElementById('postsContainer').innerHTML =
           '<div class="error-msg">Failed to load Paz posts. Will retry on next refresh.</div>';
+      }
+    }
+
+    async function loadSavedPostIds() {
+      try {
+        const resp = await fetch('/api/saved');
+        if (!resp.ok) return;
+        const posts = await resp.json();
+        savedPostIds = new Set(posts.map(p => `${p.channel}/${p.post_id}`));
+      } catch (e) {}
+    }
+
+    async function fetchSavedPosts() {
+      const dot = document.getElementById('statusDot');
+      const text = document.getElementById('statusText');
+      dot.classList.add('loading');
+      text.textContent = 'Loading saved posts...';
+
+      try {
+        const resp = await fetch('/api/saved');
+        if (!resp.ok) throw new Error('Failed');
+        allPosts = await resp.json();
+        savedPostIds = new Set(allPosts.map(p => `${p.channel}/${p.post_id}`));
+        renderFilters();
+        renderPosts();
+        const now = new Date();
+        text.textContent = `Saved posts ${now.toLocaleTimeString()}`;
+        dot.classList.remove('loading');
+      } catch (e) {
+        dot.classList.remove('loading');
+        dot.style.background = '#ef5350';
+        text.textContent = 'Error loading saved posts';
+        document.getElementById('postsContainer').innerHTML =
+          '<div class="error-msg">Failed to load saved posts.</div>';
+      }
+    }
+
+    async function toggleSave(btn) {
+      const channel = btn.dataset.channel;
+      const postId = btn.dataset.postid;
+      const key = `${channel}/${postId}`;
+
+      if (savedPostIds.has(key)) {
+        savedPostIds.delete(key);
+        btn.classList.remove('saved');
+        btn.title = 'Save for later';
+        btn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M17 3H7c-1.1 0-2 .9-2 2v16l7-3 7 3V5c0-1.1-.9-2-2-2zm0 15l-5-2.18L7 18V5h10v13z"/></svg>`;
+        await fetch(`/api/saved/${encodeURIComponent(channel)}/${encodeURIComponent(postId)}`, { method: 'DELETE' });
+        if (currentView === 'saved') {
+          allPosts = allPosts.filter(p => !(p.channel === channel && p.post_id === postId));
+          renderFilters();
+          renderPosts();
+        }
+      } else {
+        const post = allPosts.find(p => p.channel === channel && p.post_id === postId);
+        if (!post) return;
+        savedPostIds.add(key);
+        btn.classList.add('saved');
+        btn.title = 'Remove from saved';
+        btn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M17 3H7c-1.1 0-2 .9-2 2v16l7-3 7 3V5c0-1.1-.9-2-2-2z"/></svg>`;
+        await fetch('/api/saved', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(post)
+        });
       }
     }
 
@@ -1199,6 +1313,8 @@
           await fetchPosts();
         } else if (currentView === 'paz') {
           await fetchPazPosts();
+        } else if (currentView === 'saved') {
+          await fetchSavedPosts();
         }
       } finally {
         isManualRefreshing = false;
@@ -1253,6 +1369,11 @@
         showView('paz');
       });
       
+      document.getElementById('savedFeedLink').addEventListener('click', (e) => {
+        e.preventDefault();
+        showView('saved');
+      });
+
       document.getElementById('managementLink').addEventListener('click', (e) => {
         e.preventDefault();
         showView('management');
@@ -1264,6 +1385,7 @@
       document.getElementById('stopScrollBtn').addEventListener('click', toggleStopScrolling);
 
       await fetchConfig();
+      await loadSavedPostIds();
       await fetchPosts();
       if (refreshTimer) clearInterval(refreshTimer);
       refreshTimer = setInterval(() => {

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -16,11 +17,24 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
+SAVED_POSTS_PATH = Path(__file__).parent / "saved_posts.json"
 
 
 def load_config() -> dict:
     with open(CONFIG_PATH) as f:
         return json.load(f)
+
+
+def load_saved_posts() -> list[dict]:
+    if not SAVED_POSTS_PATH.exists():
+        return []
+    with open(SAVED_POSTS_PATH) as f:
+        return json.load(f)
+
+
+def write_saved_posts(posts: list[dict]) -> None:
+    with open(SAVED_POSTS_PATH, "w") as f:
+        json.dump(posts, f, indent=2, ensure_ascii=False)
 
 
 def normalize_channel(raw: str) -> str:
@@ -176,6 +190,42 @@ async def get_paz_posts():
 
     all_posts.sort(key=lambda p: p["datetime"], reverse=True)
     return all_posts[:max_posts]
+
+
+@app.get("/api/saved")
+async def get_saved_posts():
+    posts = load_saved_posts()
+    posts.sort(key=lambda p: p.get("saved_at", p.get("datetime", "")), reverse=True)
+    return posts
+
+
+@app.post("/api/saved")
+async def save_post(request: Request):
+    try:
+        post = await request.json()
+        posts = load_saved_posts()
+        key = (post.get("channel"), post.get("post_id"))
+        if any((p.get("channel"), p.get("post_id")) == key for p in posts):
+            return {"status": "exists", "message": "Post already saved"}
+        post["saved_at"] = datetime.now(timezone.utc).isoformat()
+        posts.append(post)
+        write_saved_posts(posts)
+        return {"status": "success"}
+    except Exception as e:
+        logger.error("Failed to save post: %s", e)
+        return {"status": "error", "message": str(e)}
+
+
+@app.delete("/api/saved/{channel}/{post_id}")
+async def unsave_post(channel: str, post_id: str):
+    try:
+        posts = load_saved_posts()
+        posts = [p for p in posts if not (p.get("channel") == channel and p.get("post_id") == post_id)]
+        write_saved_posts(posts)
+        return {"status": "success"}
+    except Exception as e:
+        logger.error("Failed to unsave post: %s", e)
+        return {"status": "error", "message": str(e)}
 
 
 @app.get("/api/admin/config")
