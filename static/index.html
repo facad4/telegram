@@ -95,18 +95,13 @@
       border-radius: 2px;
     }
 
-    .header h1 {
-      font-size: 1rem;
-      font-weight: 700;
-      color: var(--accent);
-      display: flex;
-      align-items: center;
-      gap: 8px;
+    .username-display {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      font-weight: 500;
       white-space: nowrap;
       flex-shrink: 0;
     }
-
-    .header h1 svg { width: 20px; height: 20px; fill: var(--accent); }
 
     .header-right {
       display: flex;
@@ -555,16 +550,7 @@
         gap: 12px;
       }
 
-      .config-actions {
-        position: sticky;
-        bottom: 0;
-        background: var(--card-bg);
-        padding: 15px 0 0 0;
-        border-top: 1px solid var(--border);
-        margin-top: 20px;
-      }
-
-      .add-btn, .save-btn, .download-btn {
+      .add-btn {
         font-size: 0.9rem;
         padding: 10px 16px;
       }
@@ -673,7 +659,7 @@
       background: #d32f2f;
     }
 
-    .add-btn, .save-btn, .download-btn {
+    .add-btn {
       background: var(--accent);
       color: white;
       border: none;
@@ -681,17 +667,10 @@
       border-radius: 6px;
       cursor: pointer;
       font-size: 0.9rem;
-      margin-right: 10px;
     }
 
-    .add-btn:hover, .save-btn:hover, .download-btn:hover {
+    .add-btn:hover {
       background: #1976d2;
-    }
-
-    .config-actions {
-      display: flex;
-      gap: 10px;
-      margin-top: 20px;
     }
 
     .settings-grid {
@@ -887,6 +866,10 @@
       <a href="#" class="control-btn" id="savedFeedLink" title="Saved posts">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M17 3H7c-1.1 0-2 .9-2 2v16l7-3 7 3V5c0-1.1-.9-2-2-2z"/></svg>
       </a>
+      <a href="#" class="control-btn" id="managementLink" title="Settings">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41 h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.12,5.92,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.74,8.87 C2.62,9.08,2.66,9.34,2.86,9.48l2.03,1.58C4.84,11.36,4.8,11.69,4.8,12s0.02,0.64,0.07,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54 c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.44-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96 c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.47-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6 s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z"/></svg>
+      </a>
+      <span class="username-display" id="usernameDisplay"></span>
     </div>
     <div class="header-right">
       <div class="filter-bar" id="filterBar"></div>
@@ -894,8 +877,6 @@
         <span class="status-dot" id="statusDot"></span>
         <span id="statusText">Loading...</span>
       </div>
-      <a href="#" class="nav-link" id="pazFeedLink">P</a>
-      <a href="#" class="nav-link" id="managementLink">⚙️</a>
       <button class="logout-btn" id="logoutBtn" title="Logout">
         <svg viewBox="0 0 24 24"><path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/></svg>
       </button>
@@ -913,19 +894,17 @@
 
   <div class="management-container" id="managementContainer">
     <div class="management-section">
-      <h3>Main Feed Channels</h3>
-      <div class="channel-list" id="mainChannelList"></div>
-      <button class="add-btn" onclick="addChannel('main')">Add Channel</button>
+      <h3>My Channels</h3>
+      <div class="channel-list" id="feedList"></div>
+      <div style="display:flex; gap:8px; align-items:center; margin-top:10px;">
+        <input type="text" id="newFeedUrl" placeholder="Channel URL (e.g. https://t.me/channel)" style="flex:1; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:8px 10px; color:var(--text); font-size:0.9rem;">
+        <button class="add-btn" id="addFeedBtn">Add</button>
+      </div>
+      <div id="feedError" style="color:#ef5350; font-size:0.85rem; margin-top:6px; min-height:1.2em;"></div>
     </div>
 
-    <div class="management-section">
-      <h3>Paz Feed Channels</h3>
-      <div class="channel-list" id="pazChannelList"></div>
-      <button class="add-btn" onclick="addChannel('paz')">Add Channel</button>
-    </div>
-
-    <div class="management-section">
-      <h3>Settings</h3>
+    <div class="management-section" id="adminSettingsSection" style="display:none;">
+      <h3>Settings (Admin)</h3>
       <div class="settings-grid">
         <div class="setting-item">
           <label>Refresh Interval (minutes)</label>
@@ -940,11 +919,7 @@
           <input type="number" id="scrollSpeed" min="10" max="200">
         </div>
       </div>
-    </div>
-
-    <div class="config-actions">
-      <button class="save-btn" onclick="saveConfiguration()">Save Configuration</button>
-      <button class="download-btn" onclick="downloadConfig()">Download Config</button>
+      <button class="add-btn" id="saveSettingsBtn" style="margin-top:10px;">Save Settings</button>
     </div>
   </div>
   </div><!-- end appContainer -->
@@ -957,8 +932,7 @@
     let scrollSpeed = 50;
     let scrollAnimId = null;
     let paused = false;
-    let currentView = 'main'; // 'main', 'paz', 'saved', or 'management'
-    let fullConfig = {};
+    let currentView = 'main'; // 'main', 'saved', or 'management'
     let sortNewestFirst = true;
     let isManualRefreshing = false;
     let isScrollingStopped = false;
@@ -1200,10 +1174,9 @@
     function showView(view) {
       currentView = view;
       
-      // Update nav links
+      // Clear active states on nav links
       document.querySelectorAll('.nav-link').forEach(link => link.classList.remove('active'));
       
-      // Show/hide control buttons based on view
       const controlButtons = document.querySelector('.control-buttons');
       const filterBar = document.getElementById('filterBar');
       
@@ -1214,51 +1187,18 @@
         controlButtons.style.display = 'flex';
         filterBar.style.display = 'flex';
         fetchPosts();
-      } else if (view === 'paz') {
-        document.getElementById('pazFeedLink').classList.add('active');
-        document.getElementById('scrollViewport').style.display = 'flex';
-        document.getElementById('managementContainer').style.display = 'none';
-        controlButtons.style.display = 'flex';
-        filterBar.style.display = 'flex';
-        fetchPazPosts();
       } else if (view === 'saved') {
-        document.getElementById('savedFeedLink').classList.add('active');
         document.getElementById('scrollViewport').style.display = 'flex';
         document.getElementById('managementContainer').style.display = 'none';
         controlButtons.style.display = 'flex';
         filterBar.style.display = 'flex';
         fetchSavedPosts();
       } else if (view === 'management') {
-        document.getElementById('managementLink').classList.add('active');
         document.getElementById('scrollViewport').style.display = 'none';
         document.getElementById('managementContainer').style.display = 'block';
-        controlButtons.style.display = 'none';
+        controlButtons.style.display = 'flex';
         filterBar.style.display = 'none';
         loadManagementInterface();
-      }
-    }
-
-    async function fetchPazPosts() {
-      const dot = document.getElementById('statusDot');
-      const text = document.getElementById('statusText');
-      dot.classList.add('loading');
-      text.textContent = 'Loading Paz feed...';
-
-      try {
-        const resp = await authFetch('/api/paz/posts');
-        if (!resp.ok) throw new Error('Failed');
-        allPosts = await resp.json();
-        renderFilters();
-        renderPosts();
-        const now = new Date();
-        text.textContent = `Paz feed updated ${now.toLocaleTimeString()}`;
-        dot.classList.remove('loading');
-      } catch (e) {
-        dot.classList.remove('loading');
-        dot.style.background = '#ef5350';
-        text.textContent = 'Error loading Paz feed';
-        document.getElementById('postsContainer').innerHTML =
-          '<div class="error-msg">Failed to load Paz posts. Will retry on next refresh.</div>';
       }
     }
 
@@ -1329,96 +1269,108 @@
 
     // Management interface functions
     async function loadManagementInterface() {
+      const isAdmin = localStorage.getItem('is_admin') === 'true';
+      const adminSection = document.getElementById('adminSettingsSection');
+      adminSection.style.display = isAdmin ? 'block' : 'none';
+
+      await loadFeedList();
+
+      if (isAdmin) {
+        try {
+          const resp = await authFetch('/api/admin/config');
+          const config = await resp.json();
+          document.getElementById('refreshInterval').value = config.refresh_interval_minutes || 5;
+          document.getElementById('maxPosts').value = config.max_posts || 20;
+          document.getElementById('scrollSpeed').value = config.scroll_speed || 50;
+        } catch (e) {
+          console.error('Failed to load admin config:', e);
+        }
+      }
+    }
+
+    async function loadFeedList() {
+      const container = document.getElementById('feedList');
       try {
-        const resp = await authFetch('/api/admin/config');
-        fullConfig = await resp.json();
-        
-        renderChannelList('main', fullConfig.channels || []);
-        renderChannelList('paz', fullConfig.paz_channels || []);
-        
-        document.getElementById('refreshInterval').value = fullConfig.refresh_interval_minutes || 5;
-        document.getElementById('maxPosts').value = fullConfig.max_posts || 20;
-        document.getElementById('scrollSpeed').value = fullConfig.scroll_speed || 50;
+        const resp = await authFetch('/api/feeds');
+        const feeds = await resp.json();
+        if (!feeds.length) {
+          container.innerHTML = '<div style="color:var(--text-secondary); font-size:0.9rem; padding:8px 0;">No channels configured yet.</div>';
+          return;
+        }
+        container.innerHTML = feeds.map(url => `
+          <div class="channel-item">
+            <span style="flex:1; font-size:0.9rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${url}</span>
+            <button class="remove-btn" data-url="${url}">Remove</button>
+          </div>
+        `).join('');
+        container.querySelectorAll('.remove-btn').forEach(btn => {
+          btn.addEventListener('click', () => removeFeed(btn.dataset.url));
+        });
       } catch (e) {
-        console.error('Failed to load configuration:', e);
+        container.innerHTML = '<div class="error-msg">Failed to load feeds.</div>';
       }
     }
 
-    function renderChannelList(type, channels) {
-      const container = document.getElementById(type === 'main' ? 'mainChannelList' : 'pazChannelList');
-      container.innerHTML = channels.map((channel, index) => `
-        <div class="channel-item">
-          <input type="text" value="${channel}" onchange="updateChannel('${type}', ${index}, this.value)">
-          <button class="remove-btn" onclick="removeChannel('${type}', ${index})">Remove</button>
-        </div>
-      `).join('');
-    }
+    async function addFeed() {
+      const input = document.getElementById('newFeedUrl');
+      const errorEl = document.getElementById('feedError');
+      const url = input.value.trim();
+      errorEl.textContent = '';
+      if (!url) { errorEl.textContent = 'Please enter a channel URL.'; return; }
 
-    function addChannel(type) {
-      const channels = type === 'main' ? (fullConfig.channels || []) : (fullConfig.paz_channels || []);
-      channels.push('');
-      
-      if (type === 'main') {
-        fullConfig.channels = channels;
-      } else {
-        fullConfig.paz_channels = channels;
-      }
-      
-      renderChannelList(type, channels);
-    }
-
-    function removeChannel(type, index) {
-      const channels = type === 'main' ? (fullConfig.channels || []) : (fullConfig.paz_channels || []);
-      channels.splice(index, 1);
-      
-      if (type === 'main') {
-        fullConfig.channels = channels;
-      } else {
-        fullConfig.paz_channels = channels;
-      }
-      
-      renderChannelList(type, channels);
-    }
-
-    function updateChannel(type, index, value) {
-      const channels = type === 'main' ? (fullConfig.channels || []) : (fullConfig.paz_channels || []);
-      channels[index] = value;
-      
-      if (type === 'main') {
-        fullConfig.channels = channels;
-      } else {
-        fullConfig.paz_channels = channels;
+      try {
+        const resp = await authFetch('/api/feeds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ feed_url: url })
+        });
+        if (resp.status === 409) {
+          errorEl.textContent = 'Feed already exists.';
+          return;
+        }
+        if (!resp.ok) throw new Error('Failed to add feed');
+        input.value = '';
+        await loadFeedList();
+      } catch (e) {
+        errorEl.textContent = 'Error adding feed: ' + e.message;
       }
     }
 
-    async function saveConfiguration() {
-      // Update config with current form values
-      fullConfig.refresh_interval_minutes = parseInt(document.getElementById('refreshInterval').value);
-      fullConfig.max_posts = parseInt(document.getElementById('maxPosts').value);
-      fullConfig.scroll_speed = parseInt(document.getElementById('scrollSpeed').value);
+    async function removeFeed(feedUrl) {
+      try {
+        await authFetch('/api/feeds', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ feed_url: feedUrl })
+        });
+        await loadFeedList();
+      } catch (e) {
+        console.error('Failed to remove feed:', e);
+      }
+    }
 
+    async function saveAdminSettings() {
+      const config = {
+        refresh_interval_minutes: parseInt(document.getElementById('refreshInterval').value),
+        max_posts: parseInt(document.getElementById('maxPosts').value),
+        scroll_speed: parseInt(document.getElementById('scrollSpeed').value)
+      };
       try {
         const resp = await authFetch('/api/admin/config', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(fullConfig)
+          body: JSON.stringify(config)
         });
-        
         const result = await resp.json();
         if (result.status === 'success') {
-          alert('Configuration saved successfully!');
-          // Reload config for the main app
+          alert('Settings saved successfully!');
           await fetchConfig();
         } else {
-          alert('Failed to save configuration: ' + result.message);
+          alert('Failed to save settings: ' + (result.message || result.detail));
         }
       } catch (e) {
-        alert('Failed to save configuration: ' + e.message);
+        alert('Failed to save settings: ' + e.message);
       }
-    }
-
-    function downloadConfig() {
-      window.open('/api/admin/config/download', '_blank');
     }
 
     // Manual sync function
@@ -1433,8 +1385,6 @@
       try {
         if (currentView === 'main') {
           await fetchPosts();
-        } else if (currentView === 'paz') {
-          await fetchPazPosts();
         } else if (currentView === 'saved') {
           await fetchSavedPosts();
         }
@@ -1480,17 +1430,11 @@
     }
 
     async function init() {
-      // Set up navigation event listeners
       document.getElementById('mainFeedLink').addEventListener('click', (e) => {
         e.preventDefault();
         showView('main');
       });
-      
-      document.getElementById('pazFeedLink').addEventListener('click', (e) => {
-        e.preventDefault();
-        showView('paz');
-      });
-      
+
       document.getElementById('savedFeedLink').addEventListener('click', (e) => {
         e.preventDefault();
         showView('saved');
@@ -1501,10 +1445,15 @@
         showView('management');
       });
 
-      // Set up control button event listeners
       document.getElementById('syncBtn').addEventListener('click', manualSync);
       document.getElementById('orderBtn').addEventListener('click', toggleSortOrder);
       document.getElementById('stopScrollBtn').addEventListener('click', toggleStopScrolling);
+      document.getElementById('addFeedBtn').addEventListener('click', addFeed);
+      document.getElementById('saveSettingsBtn').addEventListener('click', saveAdminSettings);
+
+      document.getElementById('newFeedUrl').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); addFeed(); }
+      });
 
       await fetchConfig();
       await loadSavedPostIds();
@@ -1513,8 +1462,6 @@
       refreshTimer = setInterval(() => {
         if (currentView === 'main') {
           fetchPosts();
-        } else if (currentView === 'paz') {
-          fetchPazPosts();
         }
       }, refreshMs);
     }
@@ -1522,6 +1469,8 @@
     function showApp() {
       document.getElementById('loginOverlay').classList.add('hidden');
       document.getElementById('appContainer').classList.remove('hidden');
+      const name = localStorage.getItem('user_name');
+      document.getElementById('usernameDisplay').textContent = name || '';
     }
 
     function showLogin() {
@@ -1556,6 +1505,7 @@
         const data = await resp.json();
         localStorage.setItem('token', data.token);
         localStorage.setItem('user_name', data.user_name);
+        localStorage.setItem('is_admin', data.is_admin ? 'true' : 'false');
         showApp();
         init();
       } catch (err) {
@@ -1567,12 +1517,14 @@
     function handleLogout() {
       localStorage.removeItem('token');
       localStorage.removeItem('user_name');
+      localStorage.removeItem('is_admin');
       if (refreshTimer) clearInterval(refreshTimer);
       if (scrollAnimId) cancelAnimationFrame(scrollAnimId);
       showLogin();
       document.getElementById('loginUser').value = '';
       document.getElementById('loginPassword').value = '';
       document.getElementById('loginError').textContent = '';
+      document.getElementById('loginBtn').disabled = false;
     }
 
     // Auth gate: check token on load

@@ -27,13 +27,14 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_DAYS = 30
 
 
-async def require_auth(request: Request):
+async def require_auth(request: Request) -> dict:
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Not authenticated")
     token = auth.removeprefix("Bearer ")
     try:
-        jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
@@ -56,24 +57,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
-SAVED_POSTS_PATH = Path(__file__).parent / "saved_posts.json"
 
 
 def load_config() -> dict:
     with open(CONFIG_PATH) as f:
         return json.load(f)
-
-
-def load_saved_posts() -> list[dict]:
-    if not SAVED_POSTS_PATH.exists():
-        return []
-    with open(SAVED_POSTS_PATH) as f:
-        return json.load(f)
-
-
-def write_saved_posts(posts: list[dict]) -> None:
-    with open(SAVED_POSTS_PATH, "w") as f:
-        json.dump(posts, f, indent=2, ensure_ascii=False)
 
 
 def normalize_channel(raw: str) -> str:
@@ -197,19 +185,22 @@ async def login(request: Request):
     token = jwt.encode(
         {
             "user_name": user["user_name"],
+            "user_id": user["id"],
             "exp": datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRY_DAYS),
         },
         JWT_SECRET,
         algorithm=JWT_ALGORITHM,
     )
-    logger.info("User '%s' logged in successfully", user["user_name"])
-    return {"token": token, "user_name": user["user_name"]}
+    logger.info("User '%s' (id=%s) logged in successfully", user["user_name"], user["id"])
+    return {"token": token, "user_name": user["user_name"], "is_admin": user["id"] == 1}
 
 
-@app.get("/api/posts", dependencies=[Depends(require_auth)])
-async def get_posts():
+@app.get("/api/posts")
+async def get_posts(request: Request, user: dict = Depends(require_auth)):
+    db: Database = request.app.state.db
+    feeds = await db.get_feeds_for_user(user["user_id"])
+    channels = [normalize_channel(f["feed_url"]) for f in feeds if f.get("feed_url")]
     config = load_config()
-    channels = [normalize_channel(ch) for ch in config.get("channels", [])]
     max_posts = config.get("max_posts", 20)
 
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -235,69 +226,76 @@ async def get_config():
     }
 
 
-@app.get("/api/paz/posts", dependencies=[Depends(require_auth)])
-async def get_paz_posts():
-    config = load_config()
-    channels = [normalize_channel(ch) for ch in config.get("paz_channels", [])]
-    max_posts = config.get("max_posts", 20)
-
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        results = await asyncio.gather(
-            *[fetch_channel_html(client, ch) for ch in channels]
-        )
-
-    all_posts = []
-    for ch, html in zip(channels, results):
-        if html:
-            all_posts.extend(parse_channel_posts(html, ch))
-
-    all_posts.sort(key=lambda p: p["datetime"], reverse=True)
-    return all_posts[:max_posts]
+@app.get("/api/feeds")
+async def get_feeds(request: Request, user: dict = Depends(require_auth)):
+    db: Database = request.app.state.db
+    feeds = await db.get_feeds_for_user(user["user_id"])
+    return [f["feed_url"] for f in feeds]
 
 
-@app.get("/api/saved", dependencies=[Depends(require_auth)])
-async def get_saved_posts():
-    posts = load_saved_posts()
-    posts.sort(key=lambda p: p.get("saved_at", p.get("datetime", "")), reverse=True)
+@app.post("/api/feeds")
+async def add_feed(request: Request, user: dict = Depends(require_auth)):
+    body = await request.json()
+    feed_url = body.get("feed_url", "").strip()
+    if not feed_url:
+        return JSONResponse(status_code=400, content={"detail": "feed_url is required"})
+    db: Database = request.app.state.db
+    result = await db.add_feed(user["user_id"], feed_url)
+    if result is None:
+        return JSONResponse(status_code=409, content={"detail": "Feed already exists"})
+    return {"status": "success", "feed_url": feed_url}
+
+
+@app.delete("/api/feeds")
+async def delete_feed(request: Request, user: dict = Depends(require_auth)):
+    body = await request.json()
+    feed_url = body.get("feed_url", "").strip()
+    if not feed_url:
+        return JSONResponse(status_code=400, content={"detail": "feed_url is required"})
+    db: Database = request.app.state.db
+    removed = await db.remove_feed(user["user_id"], feed_url)
+    if not removed:
+        return JSONResponse(status_code=404, content={"detail": "Feed not found"})
+    return {"status": "success"}
+
+
+@app.get("/api/saved")
+async def get_saved_posts(request: Request, user: dict = Depends(require_auth)):
+    db: Database = request.app.state.db
+    posts = await db.get_saved_posts(user["user_id"])
     return posts
 
 
-@app.post("/api/saved", dependencies=[Depends(require_auth)])
-async def save_post(request: Request):
-    try:
-        post = await request.json()
-        posts = load_saved_posts()
-        key = (post.get("channel"), post.get("post_id"))
-        if any((p.get("channel"), p.get("post_id")) == key for p in posts):
-            return {"status": "exists", "message": "Post already saved"}
-        post["saved_at"] = datetime.now(timezone.utc).isoformat()
-        posts.append(post)
-        write_saved_posts(posts)
-        return {"status": "success"}
-    except Exception as e:
-        logger.error("Failed to save post: %s", e)
-        return {"status": "error", "message": str(e)}
+@app.post("/api/saved")
+async def save_post(request: Request, user: dict = Depends(require_auth)):
+    post = await request.json()
+    db: Database = request.app.state.db
+    result = await db.save_post(user["user_id"], post)
+    if result is None:
+        return {"status": "exists", "message": "Post already saved"}
+    return {"status": "success"}
 
 
-@app.delete("/api/saved/{channel}/{post_id}", dependencies=[Depends(require_auth)])
-async def unsave_post(channel: str, post_id: str):
-    try:
-        posts = load_saved_posts()
-        posts = [p for p in posts if not (p.get("channel") == channel and p.get("post_id") == post_id)]
-        write_saved_posts(posts)
-        return {"status": "success"}
-    except Exception as e:
-        logger.error("Failed to unsave post: %s", e)
-        return {"status": "error", "message": str(e)}
+@app.delete("/api/saved/{channel}/{post_id}")
+async def unsave_post(channel: str, post_id: str, request: Request, user: dict = Depends(require_auth)):
+    db: Database = request.app.state.db
+    removed = await db.unsave_post(user["user_id"], channel, post_id)
+    if not removed:
+        return JSONResponse(status_code=404, content={"detail": "Saved post not found"})
+    return {"status": "success"}
 
 
-@app.get("/api/admin/config", dependencies=[Depends(require_auth)])
-async def get_full_config():
+@app.get("/api/admin/config")
+async def get_full_config(user: dict = Depends(require_auth)):
+    if user.get("user_id") != 1:
+        raise HTTPException(status_code=403, detail="Admin access required")
     return load_config()
 
 
-@app.post("/api/admin/config", dependencies=[Depends(require_auth)])
-async def update_config(request: Request):
+@app.post("/api/admin/config")
+async def update_config(request: Request, user: dict = Depends(require_auth)):
+    if user.get("user_id") != 1:
+        raise HTTPException(status_code=403, detail="Admin access required")
     try:
         config_data = await request.json()
         with open(CONFIG_PATH, 'w') as f:
@@ -306,15 +304,6 @@ async def update_config(request: Request):
     except Exception as e:
         logger.error("Failed to update config: %s", e)
         return {"status": "error", "message": str(e)}
-
-
-@app.get("/api/admin/config/download", dependencies=[Depends(require_auth)])
-async def download_config():
-    return FileResponse(
-        CONFIG_PATH,
-        media_type="application/json",
-        filename="config.json"
-    )
 
 
 @app.get("/static/manifest.json")

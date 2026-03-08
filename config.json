@@ -1,15 +1,5 @@
 {
-  "channels": [
-    "https://t.me/abualiexpress",
-    "https://t.me/ziv710",
-    "https://t.me/alexmehacarmel"
-  ],
-  "paz_channels": [
-    "https://t.me/s/salehdesk1",
-    "https://t.me/s/arabworld301news",
-    "https://t.me/s/ramreports"
-  ],
   "refresh_interval_minutes": 5,
-  "max_posts": 30,
+  "max_posts": 100,
   "scroll_speed": 50
 }
