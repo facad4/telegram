@@ -1094,7 +1094,7 @@
     }
 
     (function applyStoredTheme() {
-      const stored = localStorage.getItem('theme') || 'dark';
+      const stored = localStorage.getItem('theme') || 'light';
       document.documentElement.setAttribute('data-theme', stored);
       applyThemeMeta(stored);
     })();
@@ -1437,7 +1437,7 @@
       const adminSection = document.getElementById('adminSettingsSection');
       adminSection.style.display = isAdmin ? 'block' : 'none';
 
-      updateThemeButtons(localStorage.getItem('theme') || 'dark');
+      updateThemeButtons(localStorage.getItem('theme') || 'light');
       await loadFeedList();
 
       if (isAdmin) {
