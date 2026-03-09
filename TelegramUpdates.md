@@ -255,13 +255,18 @@ Serves the main application (`static/index.html`).
 ### 5. Frontend Interface (`static/index.html`)
 
 #### Design System
-- **Theme**: Dark theme with CSS custom properties
-- **Colors**: 
-  - Background: `#0e1117`
-  - Cards: `#1a1d27`
+- **Themes**: Light/Dark toggle available in the Management (settings) panel for all users
+  - Preference stored in `localStorage` (key: `theme`), defaults to dark
+  - Applied immediately via `data-theme` attribute on `<html>`
+  - PWA meta tags (`theme-color`, `background-color`) updated dynamically
+- **Dark Theme** (default):
+  - Background: `#0e1117`, Cards: `#1a1d27`
   - Text: `#e8eaed` / `#9aa0a6` (secondary)
-  - Accent: `#2196f3`
-  - Borders: `#2d3240`
+  - Accent: `#2196f3`, Borders: `#2d3240`
+- **Light Theme** (Perplexity-inspired):
+  - Background: `#FBFAF4` (Paper White), Cards: `#FFFFFF`
+  - Text: `#091717` (Offblack) / `#5C6B6B` (secondary)
+  - Accent: `#20808D` (True Turquoise), Borders: `#E0DED6`
 - **Typography**: System font stack (-apple-system, BlinkMacSystemFont, Segoe UI, etc.)
 - **Border radius**: 14px consistent rounded corners
 
@@ -677,6 +682,8 @@ telethon           # Telegram API client for channel search autocomplete
 - `manualSync()`: Manual post refresh with loading states
 - `toggleSortOrder()`: Client-side post sorting toggle
 - `toggleStopScrolling()`: Stop/resume auto-scrolling control
+- `setTheme(theme)`: Applies light/dark theme via `data-theme` attribute, updates meta tags, saves to `localStorage`, and highlights the active button in the management panel
+- `updateThemeButtons(theme)`: Syncs the active state of theme toggle buttons in the management panel
 - `formatDate(isoStr)`: Relative time formatting
 - `sanitizeHtml(html)`: XSS prevention for post content
 
@@ -737,6 +744,12 @@ telethon           # Telegram API client for channel search autocomplete
 - **Remove Feed**: Remove button next to each feed URL; calls `DELETE /api/feeds`
 - **Duplicate Detection**: Server returns 409 if feed already exists; frontend displays "Feed already exists" error
 - **Real-time Updates**: Feed list refreshes immediately after add/remove operations
+
+### Appearance (All Users)
+- **Theme Toggle**: Light/Dark buttons in the Management panel
+- **Persistence**: Stored in `localStorage` (key: `theme`), no server round-trip
+- **Default**: Dark theme if no preference is stored
+- **Light Theme**: Perplexity AI-inspired color scheme (Paper White, Offblack text, True Turquoise accents)
 
 ### Settings Management (Admin Only, `user_id = 1`)
 - **Refresh Interval**: Configurable auto-refresh timing (1-60 minutes)

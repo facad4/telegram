@@ -7,8 +7,8 @@
   
   <!-- PWA Meta Tags -->
   <link rel="manifest" href="/static/manifest.json">
-  <meta name="theme-color" content="#2196f3">
-  <meta name="background-color" content="#0e1117">
+  <meta name="theme-color" id="metaThemeColor" content="#0e1117">
+  <meta name="background-color" id="metaBgColor" content="#0e1117">
   
   <!-- Android-specific PWA meta tags -->
   <meta name="mobile-web-app-capable" content="yes">
@@ -51,6 +51,34 @@
       --accent-light: #1a3a5c;
       --border: #2d3240;
       --radius: 14px;
+      --media-bg: #111318;
+    }
+
+    [data-theme="light"] {
+      --bg: #FBFAF4;
+      --card-bg: #F5F4EE;
+      --text: #091717;
+      --text-secondary: #5C6B6B;
+      --accent: #20808D;
+      --accent-light: #E0F2F4;
+      --border: #E0DED6;
+      --media-bg: #F0EFE9;
+    }
+
+    [data-theme="light"] .channel-dropdown {
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='%235C6B6B'%3E%3Cpath d='M7 10l5 5 5-5z'/%3E%3C/svg%3E");
+    }
+
+    [data-theme="light"] .add-btn:hover {
+      background: #1a6e79;
+    }
+
+    [data-theme="light"] .login-form button:hover {
+      background: #1a6e79;
+    }
+
+    [data-theme="light"] .post-card {
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
     }
 
     html, body {
@@ -252,7 +280,7 @@
       max-width: 500px;
       flex-shrink: 0;
       overflow: hidden;
-      background: #111318;
+      background: var(--media-bg);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -783,6 +811,43 @@
       fill: currentColor;
     }
 
+    .theme-toggle-group {
+      display: flex;
+      gap: 8px;
+    }
+
+    .theme-btn {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      padding: 8px 20px;
+      font-size: 0.9rem;
+      font-weight: 500;
+      transition: all 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .theme-btn:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .theme-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+
+    .theme-btn svg {
+      width: 16px;
+      height: 16px;
+      fill: currentColor;
+    }
+
     a.control-btn {
       text-decoration: none;
     }
@@ -960,6 +1025,20 @@
       <div style="color:var(--text-secondary); font-size:0.78rem; margin-top:4px;">Channel search suggestions appear after 4+ characters.</div>
     </div>
 
+    <div class="management-section">
+      <h3>Appearance</h3>
+      <div class="theme-toggle-group">
+        <button class="theme-btn" id="themeDarkBtn" onclick="setTheme('dark')">
+          <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z"/></svg>
+          Dark
+        </button>
+        <button class="theme-btn" id="themeLightBtn" onclick="setTheme('light')">
+          <svg viewBox="0 0 24 24"><path d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zM2 13h2c.55 0 1-.45 1-1s-.45-1-1-1H2c-.55 0-1 .45-1 1s.45 1 1 1zm18 0h2c.55 0 1-.45 1-1s-.45-1-1-1h-2c-.55 0-1 .45-1 1s.45 1 1 1zM11 2v2c0 .55.45 1 1 1s1-.45 1-1V2c0-.55-.45-1-1-1s-1 .45-1 1zm0 18v2c0 .55.45 1 1 1s1-.45 1-1v-2c0-.55-.45-1-1-1s-1 .45-1 1zM5.99 4.58a.996.996 0 0 0-1.41 0 .996.996 0 0 0 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0s.39-1.03 0-1.41L5.99 4.58zm12.37 12.37a.996.996 0 0 0-1.41 0 .996.996 0 0 0 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0a.996.996 0 0 0 0-1.41l-1.06-1.06zm1.06-10.96a.996.996 0 0 0 0-1.41.996.996 0 0 0-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06zM7.05 18.36a.996.996 0 0 0 0-1.41.996.996 0 0 0-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06z"/></svg>
+          Light
+        </button>
+      </div>
+    </div>
+
     <div class="management-section" id="adminSettingsSection" style="display:none;">
       <h3>Settings (Admin)</h3>
       <div class="settings-grid">
@@ -982,6 +1061,44 @@
   </div><!-- end appContainer -->
 
   <script>
+    function applyThemeMeta(theme) {
+      const metaTheme = document.getElementById('metaThemeColor');
+      const metaBg = document.getElementById('metaBgColor');
+      const appleStatus = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
+      const androidStatus = document.querySelector('meta[name="mobile-web-app-status-bar-style"]');
+      if (theme === 'light') {
+        if (metaTheme) metaTheme.content = '#FBFAF4';
+        if (metaBg) metaBg.content = '#FBFAF4';
+        if (appleStatus) appleStatus.content = 'default';
+        if (androidStatus) androidStatus.content = 'default';
+      } else {
+        if (metaTheme) metaTheme.content = '#0e1117';
+        if (metaBg) metaBg.content = '#0e1117';
+        if (appleStatus) appleStatus.content = 'black-translucent';
+        if (androidStatus) androidStatus.content = 'black-translucent';
+      }
+    }
+
+    function setTheme(theme) {
+      document.documentElement.setAttribute('data-theme', theme);
+      localStorage.setItem('theme', theme);
+      applyThemeMeta(theme);
+      updateThemeButtons(theme);
+    }
+
+    function updateThemeButtons(theme) {
+      const darkBtn = document.getElementById('themeDarkBtn');
+      const lightBtn = document.getElementById('themeLightBtn');
+      if (darkBtn) darkBtn.classList.toggle('active', theme === 'dark');
+      if (lightBtn) lightBtn.classList.toggle('active', theme === 'light');
+    }
+
+    (function applyStoredTheme() {
+      const stored = localStorage.getItem('theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', stored);
+      applyThemeMeta(stored);
+    })();
+
     let allPosts = [];
     let activeFilter = null;
     let refreshMs = 5 * 60 * 1000;
@@ -1165,10 +1282,7 @@
         if (mediaSrc) {
           mediaSideHtml = `<div class="post-media-side"><img src="${mediaSrc}" alt="" loading="lazy"></div>`;
         } else {
-          const iconHtml = post.channel_photo
-            ? `<img src="${post.channel_photo}" alt="">`
-            : (post.channel_title || post.channel)[0].toUpperCase();
-          mediaSideHtml = `<div class="post-media-side empty"><div class="channel-icon-large">${iconHtml}</div></div>`;
+          mediaSideHtml = '';
         }
 
         let linkPreviewHtml = '';
@@ -1323,6 +1437,7 @@
       const adminSection = document.getElementById('adminSettingsSection');
       adminSection.style.display = isAdmin ? 'block' : 'none';
 
+      updateThemeButtons(localStorage.getItem('theme') || 'dark');
       await loadFeedList();
 
       if (isAdmin) {
