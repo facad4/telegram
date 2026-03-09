@@ -112,47 +112,35 @@
       margin-left: auto;
     }
 
-    .filter-bar { 
-      display: flex; 
-      gap: 5px; 
-      overflow-x: auto;
-      overflow-y: hidden;
-      flex-wrap: nowrap;
-      max-width: 500px;
-      padding: 2px;
-      scrollbar-width: thin;
-      scrollbar-color: var(--border) transparent;
-      scroll-behavior: smooth;
-      flex-shrink: 1;
-    }
-
-    .filter-bar::-webkit-scrollbar {
-      height: 4px;
-    }
-
-    .filter-bar::-webkit-scrollbar-track {
-      background: transparent;
-    }
-
-    .filter-bar::-webkit-scrollbar-thumb {
-      background: var(--border);
-      border-radius: 2px;
-    }
-
-    .filter-btn {
-      padding: 4px 12px;
+    .channel-dropdown {
+      background: var(--bg);
+      color: var(--text);
       border: 1px solid var(--border);
-      border-radius: 14px;
-      background: transparent;
-      color: var(--text-secondary);
+      border-radius: 8px;
+      padding: 5px 28px 5px 10px;
       font-size: 0.85rem;
       cursor: pointer;
-      transition: all 0.15s;
+      outline: none;
+      transition: border-color 0.15s;
+      appearance: none;
+      -webkit-appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='%239aa0a6'%3E%3Cpath d='M7 10l5 5 5-5z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 8px center;
+      max-width: 200px;
       white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
-    .filter-btn:hover { border-color: var(--accent); color: var(--accent); }
-    .filter-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .channel-dropdown:hover, .channel-dropdown:focus {
+      border-color: var(--accent);
+    }
+
+    .channel-dropdown option {
+      background: var(--card-bg);
+      color: var(--text);
+    }
 
     .status {
       font-size: 0.75rem;
@@ -462,17 +450,9 @@
         padding: 0 16px;
       }
 
-      .header h1 {
-        font-size: 0.9rem;
-      }
-
-      .filter-bar {
-        max-width: 250px;
-      }
-
-      .filter-btn {
+      .channel-dropdown {
+        max-width: 150px;
         font-size: 0.8rem;
-        padding: 3px 10px;
       }
 
       .status {
@@ -671,6 +651,77 @@
 
     .add-btn:hover {
       background: #1976d2;
+    }
+
+    .feed-input-wrapper {
+      position: relative;
+      flex: 1;
+    }
+
+    .autocomplete-dropdown {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-top: none;
+      border-radius: 0 0 6px 6px;
+      max-height: 260px;
+      overflow-y: auto;
+      z-index: 20;
+      display: none;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+
+    .autocomplete-dropdown::-webkit-scrollbar { width: 5px; }
+    .autocomplete-dropdown::-webkit-scrollbar-track { background: transparent; }
+    .autocomplete-dropdown::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    .autocomplete-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      cursor: pointer;
+      transition: background 0.12s;
+    }
+
+    .autocomplete-item:hover, .autocomplete-item.active {
+      background: var(--accent-light);
+    }
+
+    .autocomplete-item-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .autocomplete-item-title {
+      font-size: 0.88rem;
+      color: var(--text);
+      font-weight: 500;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .autocomplete-item-username {
+      font-size: 0.78rem;
+      color: var(--text-secondary);
+    }
+
+    .autocomplete-item-members {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      flex-shrink: 0;
+    }
+
+    .autocomplete-loading {
+      padding: 10px;
+      text-align: center;
+      color: var(--text-secondary);
+      font-size: 0.85rem;
     }
 
     .settings-grid {
@@ -872,7 +923,9 @@
       <span class="username-display" id="usernameDisplay"></span>
     </div>
     <div class="header-right">
-      <div class="filter-bar" id="filterBar"></div>
+      <select class="channel-dropdown" id="filterBar">
+        <option value="">All Channels</option>
+      </select>
       <div class="status">
         <span class="status-dot" id="statusDot"></span>
         <span id="statusText">Loading...</span>
@@ -897,10 +950,14 @@
       <h3>My Channels</h3>
       <div class="channel-list" id="feedList"></div>
       <div style="display:flex; gap:8px; align-items:center; margin-top:10px;">
-        <input type="text" id="newFeedUrl" placeholder="Channel URL (e.g. https://t.me/channel)" style="flex:1; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:8px 10px; color:var(--text); font-size:0.9rem;">
+        <div class="feed-input-wrapper">
+          <input type="text" id="newFeedUrl" placeholder="Search channels or paste URL" autocomplete="off" style="width:100%; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:8px 10px; color:var(--text); font-size:0.9rem;">
+          <div class="autocomplete-dropdown" id="autocompleteDropdown"></div>
+        </div>
         <button class="add-btn" id="addFeedBtn">Add</button>
       </div>
       <div id="feedError" style="color:#ef5350; font-size:0.85rem; margin-top:6px; min-height:1.2em;"></div>
+      <div style="color:var(--text-secondary); font-size:0.78rem; margin-top:4px;">Channel search suggestions appear after 4+ characters.</div>
     </div>
 
     <div class="management-section" id="adminSettingsSection" style="display:none;">
@@ -1044,23 +1101,16 @@
     }, { passive: true });
 
     function renderFilters() {
-      const bar = document.getElementById('filterBar');
+      const dropdown = document.getElementById('filterBar');
       const channels = [...new Set(allPosts.map(p => p.channel))];
-      if (channels.length < 2) { bar.innerHTML = ''; return; }
 
-      let html = `<button class="filter-btn ${!activeFilter ? 'active' : ''}" data-filter="">All</button>`;
+      let html = `<option value="">All Channels</option>`;
       for (const ch of channels) {
         const title = allPosts.find(p => p.channel === ch)?.channel_title || ch;
-        html += `<button class="filter-btn ${activeFilter === ch ? 'active' : ''}" data-filter="${ch}">${title}</button>`;
+        const selected = activeFilter === ch ? 'selected' : '';
+        html += `<option value="${ch}" ${selected}>${title}</option>`;
       }
-      bar.innerHTML = html;
-      bar.querySelectorAll('.filter-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-          activeFilter = btn.dataset.filter || null;
-          renderFilters();
-          renderPosts();
-        });
-      });
+      dropdown.innerHTML = html;
     }
 
     function formatDate(isoStr) {
@@ -1185,13 +1235,13 @@
         document.getElementById('scrollViewport').style.display = 'flex';
         document.getElementById('managementContainer').style.display = 'none';
         controlButtons.style.display = 'flex';
-        filterBar.style.display = 'flex';
+        filterBar.style.display = '';
         fetchPosts();
       } else if (view === 'saved') {
         document.getElementById('scrollViewport').style.display = 'flex';
         document.getElementById('managementContainer').style.display = 'none';
         controlButtons.style.display = 'flex';
-        filterBar.style.display = 'flex';
+        filterBar.style.display = '';
         fetchSavedPosts();
       } else if (view === 'management') {
         document.getElementById('scrollViewport').style.display = 'none';
@@ -1336,6 +1386,123 @@
       }
     }
 
+    // --- Autocomplete for channel search ---
+    let acDebounceTimer = null;
+    let acActiveIndex = -1;
+    let acResults = [];
+
+    function formatMemberCount(count) {
+      if (!count) return '';
+      if (count >= 1_000_000) return (count / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+      if (count >= 1_000) return (count / 1_000).toFixed(1).replace(/\.0$/, '') + 'K';
+      return String(count);
+    }
+
+    function showAutocomplete(items) {
+      const dropdown = document.getElementById('autocompleteDropdown');
+      acResults = items;
+      acActiveIndex = -1;
+      if (!items.length) {
+        dropdown.style.display = 'none';
+        return;
+      }
+      dropdown.innerHTML = items.map((ch, i) => `
+        <div class="autocomplete-item" data-index="${i}" data-username="${ch.username}">
+          <div class="autocomplete-item-info">
+            <div class="autocomplete-item-title">${ch.title}</div>
+            <div class="autocomplete-item-username">@${ch.username}</div>
+          </div>
+          ${ch.participants_count ? `<div class="autocomplete-item-members">${formatMemberCount(ch.participants_count)} members</div>` : ''}
+        </div>
+      `).join('');
+      dropdown.style.display = 'block';
+
+      dropdown.querySelectorAll('.autocomplete-item').forEach(el => {
+        el.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          selectAutocompleteItem(parseInt(el.dataset.index));
+        });
+      });
+    }
+
+    function selectAutocompleteItem(index) {
+      if (index < 0 || index >= acResults.length) return;
+      const ch = acResults[index];
+      document.getElementById('newFeedUrl').value = 'https://t.me/' + ch.username;
+      hideAutocomplete();
+    }
+
+    function hideAutocomplete() {
+      document.getElementById('autocompleteDropdown').style.display = 'none';
+      acResults = [];
+      acActiveIndex = -1;
+    }
+
+    async function searchChannels(query) {
+      const dropdown = document.getElementById('autocompleteDropdown');
+      if (query.length < 2) {
+        hideAutocomplete();
+        return;
+      }
+      dropdown.innerHTML = '<div class="autocomplete-loading">Searching...</div>';
+      dropdown.style.display = 'block';
+      try {
+        const resp = await authFetch('/api/search-channels?q=' + encodeURIComponent(query));
+        if (!resp.ok) { hideAutocomplete(); return; }
+        const results = await resp.json();
+        showAutocomplete(results);
+      } catch (e) {
+        hideAutocomplete();
+      }
+    }
+
+    function setupAutocomplete() {
+      const input = document.getElementById('newFeedUrl');
+
+      input.addEventListener('input', () => {
+        clearTimeout(acDebounceTimer);
+        const val = input.value.trim();
+        if (val.startsWith('http://') || val.startsWith('https://') || val.startsWith('t.me/')) {
+          hideAutocomplete();
+          return;
+        }
+        acDebounceTimer = setTimeout(() => searchChannels(val), 300);
+      });
+
+      input.addEventListener('keydown', (e) => {
+        const dropdown = document.getElementById('autocompleteDropdown');
+        if (dropdown.style.display !== 'block' || !acResults.length) return;
+
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          acActiveIndex = Math.min(acActiveIndex + 1, acResults.length - 1);
+          updateActiveItem();
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          acActiveIndex = Math.max(acActiveIndex - 1, 0);
+          updateActiveItem();
+        } else if (e.key === 'Enter' && acActiveIndex >= 0) {
+          e.preventDefault();
+          selectAutocompleteItem(acActiveIndex);
+        } else if (e.key === 'Escape') {
+          hideAutocomplete();
+        }
+      });
+
+      input.addEventListener('blur', () => {
+        setTimeout(hideAutocomplete, 150);
+      });
+    }
+
+    function updateActiveItem() {
+      const dropdown = document.getElementById('autocompleteDropdown');
+      dropdown.querySelectorAll('.autocomplete-item').forEach((el, i) => {
+        el.classList.toggle('active', i === acActiveIndex);
+      });
+      const active = dropdown.querySelector('.autocomplete-item.active');
+      if (active) active.scrollIntoView({ block: 'nearest' });
+    }
+
     async function removeFeed(feedUrl) {
       try {
         await authFetch('/api/feeds', {
@@ -1445,6 +1612,10 @@
         showView('management');
       });
 
+      document.getElementById('filterBar').addEventListener('change', (e) => {
+        activeFilter = e.target.value || null;
+        renderPosts();
+      });
       document.getElementById('syncBtn').addEventListener('click', manualSync);
       document.getElementById('orderBtn').addEventListener('click', toggleSortOrder);
       document.getElementById('stopScrollBtn').addEventListener('click', toggleStopScrolling);
@@ -1452,8 +1623,9 @@
       document.getElementById('saveSettingsBtn').addEventListener('click', saveAdminSettings);
 
       document.getElementById('newFeedUrl').addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') { e.preventDefault(); addFeed(); }
+        if (e.key === 'Enter' && acActiveIndex < 0) { e.preventDefault(); addFeed(); }
       });
+      setupAutocomplete();
 
       await fetchConfig();
       await loadSavedPostIds();

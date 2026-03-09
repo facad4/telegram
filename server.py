@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import secrets
 from contextlib import asynccontextmanager
@@ -14,6 +15,8 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from telethon import TelegramClient, functions
+from telethon.sessions import StringSession
 
 from database import Database
 
@@ -51,7 +54,32 @@ async def lifespan(app: FastAPI):
     logger.info("Found %d feeds in database:", len(feeds))
     for feed in feeds:
         logger.info("  Feed: user_id=%s, url=%s", feed.get("user_id"), feed.get("feed_url"))
+
+    api_id = os.environ.get("TELEGRAM_API_ID")
+    api_hash = os.environ.get("TELEGRAM_API_HASH")
+    session_str = os.environ.get("TELEGRAM_SESSION")
+    app.state.telegram = None
+
+    if api_id and api_hash and session_str:
+        try:
+            tg = TelegramClient(StringSession(session_str), int(api_id), api_hash)
+            await tg.connect()
+            if await tg.is_user_authorized():
+                app.state.telegram = tg
+                logger.info("Telegram client connected for channel search")
+            else:
+                logger.warning("Telegram session is not authorized; channel search disabled")
+                await tg.disconnect()
+        except Exception as e:
+            logger.warning("Failed to initialize Telegram client: %s", e)
+    else:
+        logger.info("Telegram API credentials not configured; channel search disabled")
+
     yield
+
+    if app.state.telegram:
+        await app.state.telegram.disconnect()
+        logger.info("Telegram client disconnected")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -257,6 +285,31 @@ async def delete_feed(request: Request, user: dict = Depends(require_auth)):
     if not removed:
         return JSONResponse(status_code=404, content={"detail": "Feed not found"})
     return {"status": "success"}
+
+
+@app.get("/api/search-channels")
+async def search_channels(request: Request, q: str = "", user: dict = Depends(require_auth)):
+    tg: TelegramClient | None = request.app.state.telegram
+    if tg is None:
+        return JSONResponse(status_code=503, content={"detail": "Channel search not available"})
+    if len(q.strip()) < 2:
+        return []
+    try:
+        result = await tg(functions.contacts.SearchRequest(q=q.strip(), limit=8))
+        channels = []
+        for chat in result.chats:
+            username = getattr(chat, "username", None)
+            if not username:
+                continue
+            channels.append({
+                "username": username,
+                "title": getattr(chat, "title", username),
+                "participants_count": getattr(chat, "participants_count", None),
+            })
+        return channels
+    except Exception as e:
+        logger.error("Telegram search failed: %s", e)
+        return JSONResponse(status_code=500, content={"detail": "Search failed"})
 
 
 @app.get("/api/saved")

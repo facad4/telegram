@@ -8,8 +8,8 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - **Database**: Supabase (PostgreSQL) via async Python SDK, encapsulated in `database.py`
 - **Frontend**: Single-page vanilla HTML/CSS/JavaScript application (`static/index.html`) with auto-scrolling tiles
 - **Configuration**: `config.json` for global settings; per-user channel feeds stored in Supabase `Feeds` table
-- **Environment**: `.env` file for secrets (`SUPABASE_URL`, `SUPABASE_KEY`) loaded via `python-dotenv`
-- **Dependencies**: FastAPI, httpx, BeautifulSoup4, supabase, python-dotenv (see `requirements.txt`)
+- **Environment**: `.env` file for secrets (`SUPABASE_URL`, `SUPABASE_KEY`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION`) loaded via `python-dotenv`
+- **Dependencies**: FastAPI, httpx, BeautifulSoup4, supabase, python-dotenv, telethon (see `requirements.txt`)
 
 ## Core Features
 
@@ -190,6 +190,26 @@ Removes a feed for the logged-in user.
 ```json
 { "status": "success" }
 ```
+
+#### `GET /api/search-channels` (protected)
+Searches for public Telegram channels using the Telegram API (Telethon). Requires `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `TELEGRAM_SESSION` environment variables.
+
+**Query parameter**: `q` (minimum 2 characters)
+
+**Response format**:
+```json
+[
+  {
+    "username": "channelname",
+    "title": "Channel Display Name",
+    "participants_count": 12500
+  }
+]
+```
+
+**Error responses**:
+- 503 if Telegram client is not configured/connected
+- 500 if the Telegram search request fails
 
 #### `GET /api/config` (protected)
 Returns client-specific configuration settings from `config.json`.
@@ -500,6 +520,7 @@ httpx              # Async HTTP client for Telegram scraping
 beautifulsoup4     # HTML parsing for post extraction
 supabase           # Supabase Python SDK (async client for PostgreSQL)
 python-dotenv      # Load environment variables from .env file
+telethon           # Telegram API client for channel search autocomplete
 ```
 
 **Key imports in `server.py`**:
@@ -513,6 +534,7 @@ python-dotenv      # Load environment variables from .env file
 - `jwt` (PyJWT) - JWT token encoding/decoding for authentication
 - `fastapi` - Web framework, responses, static files, `Depends` for auth middleware
 - `dotenv.load_dotenv` - Environment variable loading
+- `telethon` - Telegram API client for channel search (TelegramClient, StringSession, functions.contacts.SearchRequest)
 - `database.Database` - Supabase database abstraction
 
 ## Technical Specifications
@@ -555,6 +577,7 @@ python-dotenv      # Load environment variables from .env file
 - **Rate limiting**: None implemented (relies on Telegram's rate limiting)
 - **User-Agent spoofing**: Uses Chrome UA to avoid bot detection
 - **Supabase credentials**: Stored in `.env` file (excluded from git via `.gitignore`); loaded at runtime via `python-dotenv`
+- **Telegram API credentials**: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `TELEGRAM_SESSION` in `.env`; optional -- channel search autocomplete is disabled if not configured
 - **Password logging**: User passwords are intentionally excluded from startup log output
 - **Service worker**: Does not intercept fetch requests (avoids stripping `Authorization` headers on mobile browsers)
 
@@ -606,6 +629,7 @@ python-dotenv      # Load environment variables from .env file
 - `get_feeds(request, user)`: `GET /api/feeds` -- returns user's feed URLs from Supabase
 - `add_feed(request, user)`: `POST /api/feeds` -- adds a feed with duplicate check (409 on conflict)
 - `delete_feed(request, user)`: `DELETE /api/feeds` -- removes a feed for the user
+- `search_channels(request, q, user)`: `GET /api/search-channels` -- searches Telegram for public channels via Telethon `contacts.SearchRequest`
 - `get_full_config(user)`: `GET /api/admin/config` -- returns config.json (admin-only, 403 for non-admin)
 - `update_config(request, user)`: `POST /api/admin/config` -- updates config.json (admin-only, 403 for non-admin)
 - `normalize_channel(raw: str) -> str`: Extracts channel name from various URL formats
@@ -644,6 +668,10 @@ python-dotenv      # Load environment variables from .env file
 - `loadManagementInterface()`: Loads feed list and conditionally shows admin settings
 - `loadFeedList()`: Fetches and renders user's feeds from `/api/feeds`
 - `addFeed()`: Adds a feed via `POST /api/feeds` with duplicate error display
+- `setupAutocomplete()`: Initializes channel search autocomplete on the feed input (debounce, keyboard navigation, blur handling)
+- `searchChannels(query)`: Calls `GET /api/search-channels?q=` and populates the autocomplete dropdown
+- `showAutocomplete(items)` / `hideAutocomplete()`: Renders or hides the autocomplete dropdown
+- `selectAutocompleteItem(index)`: Populates the feed input with the selected channel's URL
 - `removeFeed(feedUrl)`: Removes a feed via `DELETE /api/feeds`
 - `saveAdminSettings()`: Saves global settings via `POST /api/admin/config` (admin only)
 - `manualSync()`: Manual post refresh with loading states
@@ -704,7 +732,8 @@ python-dotenv      # Load environment variables from .env file
 
 ### Feed Management (All Users)
 - **Per-User Feeds**: Each user manages their own channel list stored in Supabase
-- **Add Feed**: Text input + Add button; calls `POST /api/feeds` with server-side duplicate prevention
+- **Add Feed**: Text input with autocomplete + Add button; calls `POST /api/feeds` with server-side duplicate prevention
+- **Channel Autocomplete**: As the user types in the feed input, the frontend queries `GET /api/search-channels?q=` (debounced 300ms) and displays a dropdown of matching public Telegram channels with title, @username, and member count. Selecting a result populates the input with the channel URL. Keyboard navigation (Arrow Up/Down, Enter, Escape) is supported. Autocomplete is skipped when the input looks like a URL.
 - **Remove Feed**: Remove button next to each feed URL; calls `DELETE /api/feeds`
 - **Duplicate Detection**: Server returns 409 if feed already exists; frontend displays "Feed already exists" error
 - **Real-time Updates**: Feed list refreshes immediately after add/remove operations
