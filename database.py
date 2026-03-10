@@ -46,7 +46,10 @@ class Database:
         )
         return response.data
 
-    async def add_feed(self, user_id: int, feed_url: str) -> dict | None:
+    async def add_feed(
+        self, user_id: int, feed_url: str,
+        is_private: bool = False, admin_only: bool = False,
+    ) -> dict | None:
         """Insert a feed row. Returns None if (user_id, feed_url) already exists."""
         existing = (
             await self.client.table("feeds")
@@ -59,10 +62,27 @@ class Database:
             return None
         response = (
             await self.client.table("feeds")
-            .insert({"user_id": user_id, "feed_url": feed_url})
+            .insert({
+                "user_id": user_id,
+                "feed_url": feed_url,
+                "is_private": is_private,
+                "admin_only": admin_only,
+            })
             .execute()
         )
         return response.data[0] if response.data else None
+
+    async def is_feed_admin_only(self, feed_url: str) -> bool:
+        """Check if any feed row with this URL is marked admin_only."""
+        response = (
+            await self.client.table("feeds")
+            .select("admin_only")
+            .eq("feed_url", feed_url)
+            .eq("admin_only", True)
+            .limit(1)
+            .execute()
+        )
+        return bool(response.data)
 
     async def remove_feed(self, user_id: int, feed_url: str) -> bool:
         response = (

@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import io
 import json
 import logging
 import os
@@ -17,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from telethon import TelegramClient, functions
 from telethon.sessions import StringSession
+from telethon.tl.types import Channel, Chat, MessageMediaPhoto, MessageMediaDocument
 
 from database import Database
 
@@ -198,6 +201,69 @@ def parse_channel_posts(html: str, channel: str) -> list[dict]:
     return posts
 
 
+async def fetch_private_channel_posts(
+    tg: TelegramClient, channel_id: int, limit: int = 30,
+) -> list[dict]:
+    """Fetch recent posts from a private channel via Telethon API."""
+    try:
+        entity = await tg.get_entity(channel_id)
+        channel_title = getattr(entity, "title", str(channel_id))
+
+        channel_photo = None
+        try:
+            photo_file = await tg.download_profile_photo(entity, file=bytes)
+            if photo_file:
+                b64 = base64.b64encode(photo_file).decode("ascii")
+                channel_photo = f"data:image/jpeg;base64,{b64}"
+        except Exception:
+            pass
+
+        messages = await tg.get_messages(entity, limit=limit)
+        posts = []
+        for msg in messages:
+            if msg.text is None and msg.media is None:
+                continue
+
+            text_plain = msg.text or ""
+            text_html = f"<div>{text_plain}</div>" if text_plain else ""
+            views = str(msg.views) if msg.views else ""
+            datetime_str = msg.date.isoformat() if msg.date else ""
+
+            photo_url = None
+            video_thumb = None
+            if isinstance(msg.media, MessageMediaPhoto):
+                try:
+                    buf = io.BytesIO()
+                    await tg.download_media(msg.media, file=buf, thumb=-1)
+                    buf.seek(0)
+                    b64 = base64.b64encode(buf.read()).decode("ascii")
+                    photo_url = f"data:image/jpeg;base64,{b64}"
+                except Exception:
+                    pass
+
+            real_channel_id = getattr(entity, "id", channel_id)
+
+            posts.append({
+                "channel": str(real_channel_id),
+                "channel_title": channel_title,
+                "channel_photo": channel_photo,
+                "post_id": str(msg.id),
+                "post_url": f"https://t.me/c/{real_channel_id}/{msg.id}",
+                "text_html": text_html,
+                "text_plain": text_plain,
+                "views": views,
+                "datetime": datetime_str,
+                "photo_url": photo_url,
+                "video_thumb": video_thumb,
+                "link_preview": None,
+            })
+
+        return posts
+    except Exception as e:
+        logger.error("Failed to fetch private channel %s: %s", channel_id, e)
+        return []
+
+
 @app.post("/api/login")
 async def login(request: Request):
     body = await request.json()
@@ -227,19 +293,33 @@ async def login(request: Request):
 async def get_posts(request: Request, user: dict = Depends(require_auth)):
     db: Database = request.app.state.db
     feeds = await db.get_feeds_for_user(user["user_id"])
-    channels = [normalize_channel(f["feed_url"]) for f in feeds if f.get("feed_url")]
     config = load_config()
     max_posts = config.get("max_posts", 20)
 
+    public_feeds = [f for f in feeds if not f.get("is_private") and f.get("feed_url")]
+    private_feeds = [f for f in feeds if f.get("is_private") and f.get("feed_url")]
+
+    public_channels = [normalize_channel(f["feed_url"]) for f in public_feeds]
     async with httpx.AsyncClient(timeout=15.0) as client:
         results = await asyncio.gather(
-            *[fetch_channel_html(client, ch) for ch in channels]
+            *[fetch_channel_html(client, ch) for ch in public_channels]
         )
 
     all_posts = []
-    for ch, html in zip(channels, results):
+    for ch, html in zip(public_channels, results):
         if html:
             all_posts.extend(parse_channel_posts(html, ch))
+
+    tg: TelegramClient | None = request.app.state.telegram
+    if tg and private_feeds:
+        private_results = await asyncio.gather(
+            *[
+                fetch_private_channel_posts(tg, int(f["feed_url"]), limit=max_posts)
+                for f in private_feeds
+            ]
+        )
+        for posts in private_results:
+            all_posts.extend(posts)
 
     all_posts.sort(key=lambda p: p["datetime"], reverse=True)
     return all_posts[:max_posts]
@@ -258,7 +338,14 @@ async def get_config():
 async def get_feeds(request: Request, user: dict = Depends(require_auth)):
     db: Database = request.app.state.db
     feeds = await db.get_feeds_for_user(user["user_id"])
-    return [f["feed_url"] for f in feeds]
+    return [
+        {
+            "feed_url": f["feed_url"],
+            "is_private": f.get("is_private", False),
+            "admin_only": f.get("admin_only", False),
+        }
+        for f in feeds
+    ]
 
 
 @app.post("/api/feeds")
@@ -267,8 +354,19 @@ async def add_feed(request: Request, user: dict = Depends(require_auth)):
     feed_url = body.get("feed_url", "").strip()
     if not feed_url:
         return JSONResponse(status_code=400, content={"detail": "feed_url is required"})
+
+    is_private = body.get("is_private", False)
+    admin_only = body.get("admin_only", False)
+
     db: Database = request.app.state.db
-    result = await db.add_feed(user["user_id"], feed_url)
+
+    if user.get("user_id") != 1:
+        if admin_only:
+            raise HTTPException(status_code=403, detail="Only admin can create admin-only feeds")
+        if await db.is_feed_admin_only(feed_url):
+            raise HTTPException(status_code=403, detail="This channel is restricted to admin")
+
+    result = await db.add_feed(user["user_id"], feed_url, is_private=is_private, admin_only=admin_only)
     if result is None:
         return JSONResponse(status_code=409, content={"detail": "Feed already exists"})
     return {"status": "success", "feed_url": feed_url}
@@ -310,6 +408,33 @@ async def search_channels(request: Request, q: str = "", user: dict = Depends(re
     except Exception as e:
         logger.error("Telegram search failed: %s", e)
         return JSONResponse(status_code=500, content={"detail": "Search failed"})
+
+
+@app.get("/api/admin/channels")
+async def get_admin_channels(request: Request, user: dict = Depends(require_auth)):
+    """List channels the Telethon session is a member of (admin only)."""
+    if user.get("user_id") != 1:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    tg: TelegramClient | None = request.app.state.telegram
+    if tg is None:
+        return JSONResponse(status_code=503, content={"detail": "Telegram client not available"})
+    try:
+        dialogs = await tg.get_dialogs()
+        channels = []
+        for dialog in dialogs:
+            entity = dialog.entity
+            if not isinstance(entity, (Channel,)):
+                continue
+            channels.append({
+                "id": entity.id,
+                "title": getattr(entity, "title", ""),
+                "participants_count": getattr(entity, "participants_count", None),
+                "username": getattr(entity, "username", None),
+            })
+        return channels
+    except Exception as e:
+        logger.error("Failed to list channels: %s", e)
+        return JSONResponse(status_code=500, content={"detail": "Failed to list channels"})
 
 
 @app.get("/api/saved")

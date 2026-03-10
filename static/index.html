@@ -403,13 +403,6 @@
     .post-views { display: flex; align-items: center; gap: 4px; }
     .post-views svg { width: 18px; height: 18px; fill: var(--text-secondary); }
 
-    .post-actions {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-left: auto;
-    }
-
     .share-btn {
       background: transparent;
       border: none;
@@ -1107,6 +1100,13 @@
       </div>
     </div>
 
+    <div class="management-section" id="privateChannelsSection" style="display:none;">
+      <h3>Private Channels (Admin)</h3>
+      <div id="privateChannelsList" style="margin-bottom:10px;"></div>
+      <button class="add-btn" id="loadPrivateChannelsBtn">Load My Telegram Channels</button>
+      <div id="privateChannelsError" style="color:#ef5350; font-size:0.85rem; margin-top:6px; min-height:1.2em;"></div>
+    </div>
+
     <div class="management-section" id="adminSettingsSection" style="display:none;">
       <h3>Settings (Admin)</h3>
       <div class="settings-grid">
@@ -1513,15 +1513,13 @@
                   <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
                   ${post.views}
                 </div>
-                <div class="post-actions">
-                  <button class="share-btn" onclick="handleShareClick(event, '${post.post_url}', this)" title="Share post">
-                    <svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7a2.52 2.52 0 0 0 0-1.39l7-4.11A2.99 2.99 0 1 0 15 5a2.98 2.98 0 0 0 .05.54l-7.1 4.17a3 3 0 1 0 0 4.58l7.09 4.17c-.03.17-.04.35-.04.54a3 3 0 1 0 3-2.92z"/></svg>
-                    <span class="share-btn-label">Share</span>
-                  </button>
-                  <button class="save-btn ${isSaved ? 'saved' : ''}" data-channel="${post.channel}" data-postid="${post.post_id}" onclick="event.stopPropagation(); toggleSave(this)" title="${isSaved ? 'Remove from saved' : 'Save for later'}">
-                    ${isSaved ? bookmarkFilled : bookmarkOutline}
-                  </button>
-                </div>
+                <button class="share-btn" onclick="handleShareClick(event, '${post.post_url}', this)" title="Share post">
+                  <svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7a2.52 2.52 0 0 0 0-1.39l7-4.11A2.99 2.99 0 1 0 15 5a2.98 2.98 0 0 0 .05.54l-7.1 4.17a3 3 0 1 0 0 4.58l7.09 4.17c-.03.17-.04.35-.04.54a3 3 0 1 0 3-2.92z"/></svg>
+                  <span class="share-btn-label">Share</span>
+                </button>
+                <button class="save-btn ${isSaved ? 'saved' : ''}" data-channel="${post.channel}" data-postid="${post.post_id}" onclick="event.stopPropagation(); toggleSave(this)" title="${isSaved ? 'Remove from saved' : 'Save for later'}">
+                  ${isSaved ? bookmarkFilled : bookmarkOutline}
+                </button>
               </div>
             </div>
           </div>`;
@@ -1630,8 +1628,8 @@
     // Management interface functions
     async function loadManagementInterface() {
       const isAdmin = localStorage.getItem('is_admin') === 'true';
-      const adminSection = document.getElementById('adminSettingsSection');
-      adminSection.style.display = isAdmin ? 'block' : 'none';
+      document.getElementById('adminSettingsSection').style.display = isAdmin ? 'block' : 'none';
+      document.getElementById('privateChannelsSection').style.display = isAdmin ? 'block' : 'none';
 
       updateThemeButtons(localStorage.getItem('theme') || 'light');
       await loadFeedList();
@@ -1658,12 +1656,16 @@
           container.innerHTML = '<div style="color:var(--text-secondary); font-size:0.9rem; padding:8px 0;">No channels configured yet.</div>';
           return;
         }
-        container.innerHTML = feeds.map(url => `
+        container.innerHTML = feeds.map(f => {
+          const badges = [];
+          if (f.is_private) badges.push('<span style="background:var(--accent);color:#fff;font-size:0.7rem;padding:1px 6px;border-radius:4px;margin-left:6px;">Private</span>');
+          if (f.admin_only) badges.push('<span style="background:#ef5350;color:#fff;font-size:0.7rem;padding:1px 6px;border-radius:4px;margin-left:4px;">Admin</span>');
+          return `
           <div class="channel-item">
-            <span style="flex:1; font-size:0.9rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${url}</span>
-            <button class="remove-btn" data-url="${url}">Remove</button>
-          </div>
-        `).join('');
+            <span style="flex:1; font-size:0.9rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${f.feed_url}${badges.join('')}</span>
+            <button class="remove-btn" data-url="${f.feed_url}">Remove</button>
+          </div>`;
+        }).join('');
         container.querySelectorAll('.remove-btn').forEach(btn => {
           btn.addEventListener('click', () => removeFeed(btn.dataset.url));
         });
@@ -1827,6 +1829,81 @@
       }
     }
 
+    async function loadPrivateChannels() {
+      const container = document.getElementById('privateChannelsList');
+      const errorEl = document.getElementById('privateChannelsError');
+      errorEl.textContent = '';
+      container.innerHTML = '<div style="color:var(--text-secondary); font-size:0.9rem; padding:8px 0;">Loading channels...</div>';
+
+      try {
+        const resp = await authFetch('/api/admin/channels');
+        if (!resp.ok) {
+          const data = await resp.json();
+          errorEl.textContent = data.detail || 'Failed to load channels';
+          container.innerHTML = '';
+          return;
+        }
+        const channels = await resp.json();
+        if (!channels.length) {
+          container.innerHTML = '<div style="color:var(--text-secondary); font-size:0.9rem; padding:8px 0;">No channels found in Telegram session.</div>';
+          return;
+        }
+
+        const feedsResp = await authFetch('/api/feeds');
+        const existingFeeds = (await feedsResp.json()).map(f => f.feed_url);
+
+        container.innerHTML = channels.map(ch => {
+          const alreadyAdded = existingFeeds.includes(String(ch.id));
+          const memberInfo = ch.participants_count ? ` (${formatMemberCount(ch.participants_count)} members)` : '';
+          const usernameInfo = ch.username ? ` @${ch.username}` : '';
+          return `
+          <div class="channel-item" style="display:flex; align-items:center; gap:8px;">
+            <span style="flex:1; font-size:0.9rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+              ${ch.title}${usernameInfo}${memberInfo}
+            </span>
+            ${alreadyAdded
+              ? '<span style="color:var(--text-secondary); font-size:0.8rem;">Added</span>'
+              : `<button class="add-btn add-private-ch-btn" data-id="${ch.id}" data-title="${ch.title.replace(/"/g, '&quot;')}" style="padding:4px 12px; font-size:0.8rem;">Add</button>`
+            }
+          </div>`;
+        }).join('');
+
+        container.querySelectorAll('.add-private-ch-btn').forEach(btn => {
+          btn.addEventListener('click', () => addPrivateChannel(btn.dataset.id, btn));
+        });
+      } catch (e) {
+        errorEl.textContent = 'Error: ' + e.message;
+        container.innerHTML = '';
+      }
+    }
+
+    async function addPrivateChannel(channelId, btn) {
+      const errorEl = document.getElementById('privateChannelsError');
+      errorEl.textContent = '';
+      btn.disabled = true;
+      btn.textContent = 'Adding...';
+
+      try {
+        const resp = await authFetch('/api/feeds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ feed_url: channelId, is_private: true, admin_only: true })
+        });
+        if (resp.status === 409) {
+          btn.textContent = 'Already added';
+          return;
+        }
+        if (!resp.ok) throw new Error('Failed to add channel');
+        btn.textContent = 'Added';
+        btn.style.opacity = '0.6';
+        await loadFeedList();
+      } catch (e) {
+        errorEl.textContent = 'Error adding channel: ' + e.message;
+        btn.disabled = false;
+        btn.textContent = 'Add';
+      }
+    }
+
     async function saveAdminSettings() {
       const config = {
         refresh_interval_minutes: parseInt(document.getElementById('refreshInterval').value),
@@ -1931,6 +2008,7 @@
       document.getElementById('orderBtn').addEventListener('click', toggleSortOrder);
       document.getElementById('stopScrollBtn').addEventListener('click', toggleStopScrolling);
       document.getElementById('addFeedBtn').addEventListener('click', addFeed);
+      document.getElementById('loadPrivateChannelsBtn').addEventListener('click', loadPrivateChannels);
       document.getElementById('saveSettingsBtn').addEventListener('click', saveAdminSettings);
 
       document.getElementById('newFeedUrl').addEventListener('keydown', (e) => {
