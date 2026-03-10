@@ -49,14 +49,6 @@ async def require_auth(request: Request) -> dict:
 async def lifespan(app: FastAPI):
     db = await Database.create()
     app.state.db = db
-    users = await db.get_all_users()
-    logger.info("Found %d users in database:", len(users))
-    for user in users:
-        logger.info("  User: %s (created: %s)", user.get("user_name"), user.get("created_at"))
-    feeds = await db.get_all_feeds()
-    logger.info("Found %d feeds in database:", len(feeds))
-    for feed in feeds:
-        logger.info("  Feed: user_id=%s, url=%s", feed.get("user_id"), feed.get("feed_url"))
 
     api_id = os.environ.get("TELEGRAM_API_ID")
     api_hash = os.environ.get("TELEGRAM_API_HASH")
@@ -515,7 +507,10 @@ async def health_check():
 
 @app.get("/")
 async def root():
-    return FileResponse(Path(__file__).parent / "static" / "index.html")
+    return FileResponse(
+        Path(__file__).parent / "static" / "index.html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")

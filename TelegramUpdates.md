@@ -4,7 +4,7 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 
 ## Architecture
 
-- **Backend**: FastAPI server (`server.py`) that scrapes public Telegram channel pages (`t.me/s/<channel>`)
+- **Backend**: FastAPI server (`server.py`) that scrapes public Telegram channel pages (`t.me/s/<channel>`) and fetches private channel posts via Telethon API
 - **Database**: Supabase (PostgreSQL) via async Python SDK, encapsulated in `database.py`
 - **Frontend**: Single-page vanilla HTML/CSS/JavaScript application (`static/index.html`) with auto-scrolling tiles
 - **Configuration**: `config.json` for global settings; per-user channel feeds stored in Supabase `Feeds` table
@@ -19,11 +19,13 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - Each user has their own set of channel feeds stored in the Supabase `Feeds` table
 - Feeds are managed via the management interface (⚙️) or the `/api/feeds` API
 - Duplicate prevention: adding a feed that already exists for the user returns a 409 error
-- **Channel formats supported**:
+- **Channel formats supported** (public channels):
   - Plain name: `"channelname"`
   - With @: `"@channelname"`
   - Full URL: `"https://t.me/channelname"`
   - Public preview URL: `"https://t.me/s/channelname"`
+- **Private channels**: Stored by numeric channel ID with `is_private=true` flag; fetched via Telethon API
+- **Admin-only feeds**: Feeds with `admin_only=true` can only be added by the admin user (`id = 1`); non-admin users are rejected with 403
 
 #### Global Settings (`config.json`)
 - **File**: `config.json`
@@ -37,7 +39,9 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
   ```
 - Editable only by admin user (`id = 1`) via the management interface
 
-### 2. Data Scraping (`server.py`)
+### 2. Data Fetching
+
+#### Public Channel Scraping (`server.py`)
 - **Method**: HTTP requests to `https://t.me/s/<channel>` (public web preview) via httpx
 - **Parser**: BeautifulSoup4 HTML parsing with CSS selectors
 - **User Agent**: Mozilla/5.0 (Chrome) to avoid blocking
@@ -54,6 +58,23 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - **No caching**: Fresh data on every request
 - **Concurrency**: `asyncio.gather()` for simultaneous channel fetching
 - **Error handling**: Failed channels are silently skipped, errors logged
+
+#### Private Channel Fetching via Telethon API
+- **Method**: `fetch_private_channel_posts(tg_client, channel_id, limit)` uses Telethon's `get_messages()` to fetch recent messages from private channels the session user is a member of
+- **Channel identification**: Numeric channel ID (stored in `feed_url` column when `is_private=true`)
+- **Entity resolution**: `client.get_entity(channel_id)` resolves channel title and metadata
+- **Media handling**: Photos are downloaded as thumbnails via `client.download_media(msg, thumb=-1)`, base64-encoded, and served as `data:image/jpeg;base64,...` URIs in `photo_url`
+- **Post URL format**: `https://t.me/c/{channel_id}/{msg_id}` (only accessible to channel members)
+- **Channel avatar**: Downloaded via `client.download_profile_photo(entity)` and base64-encoded
+- **Concurrency**: Private channel fetches run concurrently via `asyncio.gather()`
+- **Post format**: Converted to the same dict structure as scraped public posts for seamless merging
+
+#### Post Fetching Pipeline (`GET /api/posts`)
+1. Load user's feeds from Supabase (includes `is_private` flag)
+2. Split feeds into public (`is_private=false`) and private (`is_private=true`)
+3. Public channels: fetched via httpx scraping (unchanged)
+4. Private channels: fetched via Telethon `get_messages()` (if Telegram client is available)
+5. Merge all posts, sort by datetime (descending), return top `max_posts`
 
 ### 3. Authentication System
 
@@ -74,10 +95,10 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - **Storage**: `localStorage` keys `token`, `user_name`, and `is_admin`
 
 #### Role-Based Access
-- **Admin** (user `id = 1`): Full access to management interface including global settings (refresh interval, max posts, scroll speed) and channel feed management
-- **Regular users** (user `id != 1`): Can manage their own channel feeds only; settings section is hidden
-- **Backend enforcement**: `/api/admin/config` endpoints return 403 for non-admin users
-- **Frontend enforcement**: `is_admin` flag from login response controls settings section visibility
+- **Admin** (user `id = 1`): Full access to management interface including global settings (refresh interval, max posts, scroll speed), channel feed management, and private channel discovery
+- **Regular users** (user `id != 1`): Can manage their own channel feeds only; settings section and private channels section are hidden; cannot add admin-only feeds
+- **Backend enforcement**: `/api/admin/*` endpoints return 403 for non-admin users; `POST /api/feeds` rejects admin-only feeds for non-admin users
+- **Frontend enforcement**: `is_admin` flag from login response controls settings and private channels section visibility
 
 #### Backend Endpoint Protection
 - All `/api/*` endpoints (except `/api/login`) are protected via `require_auth` FastAPI dependency
@@ -119,15 +140,15 @@ Authenticates a user against the Supabase `Users` table.
 ```
 
 #### `GET /api/posts` (protected)
-Returns the latest posts from the logged-in user's configured channels, sorted by datetime (newest first), limited to `max_posts`.
+Returns the latest posts from the logged-in user's configured channels (both public and private), sorted by datetime (newest first), limited to `max_posts`.
 
 **Implementation**: 
 - Extracts `user_id` from JWT payload
-- Queries Supabase `Feeds` table for the user's feed URLs
-- Normalizes channel names
-- Fetches all channels concurrently with 15s timeout
-- Parses HTML for each channel
-- Merges and sorts posts by datetime (descending)
+- Queries Supabase `Feeds` table for the user's feeds (including `is_private` flag)
+- Splits feeds into public and private
+- Public: normalizes channel names, fetches via httpx scraping concurrently
+- Private: fetches via Telethon `get_messages()` concurrently (if Telegram client available)
+- Merges and sorts all posts by datetime (descending)
 - Returns top `max_posts` entries (from `config.json`)
 
 **Response format**:
@@ -155,28 +176,38 @@ Returns the latest posts from the logged-in user's configured channels, sorted b
 ]
 ```
 
-#### `GET /api/feeds` (protected)
-Returns the logged-in user's feed URLs from Supabase.
+For private channel posts, `photo_url` and `channel_photo` may be base64 `data:image/jpeg;base64,...` URIs, and `post_url` uses the format `https://t.me/c/{channel_id}/{msg_id}`.
 
-**Response format**: `["https://t.me/channel1", "https://t.me/channel2"]`
+#### `GET /api/feeds` (protected)
+Returns the logged-in user's feeds from Supabase as objects with metadata.
+
+**Response format**:
+```json
+[
+  { "feed_url": "https://t.me/channel1", "is_private": false, "admin_only": false },
+  { "feed_url": "1234567890", "is_private": true, "admin_only": true }
+]
+```
 
 #### `POST /api/feeds` (protected)
-Adds a feed for the logged-in user with duplicate prevention.
+Adds a feed for the logged-in user with duplicate prevention and admin-only restriction.
 
 **Request body**:
 ```json
-{ "feed_url": "https://t.me/channelname" }
+{ "feed_url": "https://t.me/channelname", "is_private": false, "admin_only": false }
 ```
+
+The `is_private` and `admin_only` fields are optional (default `false`).
 
 **Success response** (200):
 ```json
 { "status": "success", "feed_url": "https://t.me/channelname" }
 ```
 
-**Duplicate response** (409):
-```json
-{ "detail": "Feed already exists" }
-```
+**Error responses**:
+- 409: `{ "detail": "Feed already exists" }` (duplicate)
+- 403: `{ "detail": "This channel is restricted to admin" }` (non-admin trying to add admin-only feed)
+- 403: `{ "detail": "Only admin can create admin-only feeds" }` (non-admin setting admin_only flag)
 
 #### `DELETE /api/feeds` (protected)
 Removes a feed for the logged-in user.
@@ -211,6 +242,25 @@ Searches for public Telegram channels using the Telegram API (Telethon). Require
 - 503 if Telegram client is not configured/connected
 - 500 if the Telegram search request fails
 
+#### `GET /api/admin/channels` (protected, admin-only)
+Lists all channels/supergroups the Telethon session is a member of. Used for discovering private channels to add as feeds.
+
+**Response format**:
+```json
+[
+  {
+    "id": 1234567890,
+    "title": "Channel Name",
+    "participants_count": 500,
+    "username": null
+  }
+]
+```
+
+**Error responses**:
+- 403 for non-admin users
+- 503 if Telegram client is not available
+
 #### `GET /api/config` (protected)
 Returns client-specific configuration settings from `config.json`.
 
@@ -241,11 +291,11 @@ Updates global settings via admin interface. Returns 403 for non-admin users (`u
 Health check endpoint returning `{"status": "ok"}`. Supports both GET and HEAD methods for efficient health monitoring and keep-alive services.
 
 #### `GET /`
-Serves the main application (`static/index.html`).
+Serves the main application (`static/index.html`) with `Cache-Control: no-cache, no-store, must-revalidate` headers to prevent stale cached versions.
 
 #### PWA Support
 - **`GET /static/manifest.json`**: Web app manifest with correct MIME type
-- **`GET /static/sw.js`**: Service worker for PWA compliance
+- **`GET /static/sw.js`**: Service worker for PWA compliance (versioned, cache-clearing on activation)
 
 #### Static Files
 - **Mount point**: `/static` serves files from `static/` directory
@@ -256,7 +306,7 @@ Serves the main application (`static/index.html`).
 
 #### Design System
 - **Themes**: Light/Dark toggle available in the Management (settings) panel for all users
-  - Preference stored in `localStorage` (key: `theme`), defaults to dark
+  - Preference stored in `localStorage` (key: `theme`), defaults to light
   - Applied immediately via `data-theme` attribute on `<html>`
   - PWA meta tags (`theme-color`, `background-color`) updated dynamically
 - **Dark Theme** (default):
@@ -264,7 +314,7 @@ Serves the main application (`static/index.html`).
   - Text: `#e8eaed` / `#9aa0a6` (secondary)
   - Accent: `#2196f3`, Borders: `#2d3240`
 - **Light Theme** (Perplexity-inspired):
-  - Background: `#FBFAF4` (Paper White), Cards: `#FFFFFF`
+  - Background: `#FBFAF4` (Paper White), Cards: `#F1EFE8` (slightly darker paper white)
   - Text: `#091717` (Offblack) / `#5C6B6B` (secondary)
   - Accent: `#20808D` (True Turquoise), Borders: `#E0DED6`
 - **Typography**: System font stack (-apple-system, BlinkMacSystemFont, Segoe UI, etc.)
@@ -334,12 +384,27 @@ Serves the main application (`static/index.html`).
 - **Post cards**: Click to open in Telegram (`window.open`)
 - **Channel links**: Click to open channel page (event propagation stopped)
 - **Link previews**: Click to open external links
+- **Share button**: Share post via native share sheet or custom popup (see Share System below)
+- **Save button**: Bookmark/unbookmark posts for later
 - **Filter buttons**: Toggle between "All" and individual channels
 - **Control buttons**: Manual sync, sort order toggle, and stop/resume scrolling
 - **Navigation links**: Switch between Main (left), Saved (control bar), and Management (top-right) views
 - **Logout button**: Clears session and returns to login form
 - **Login form**: Username/password inputs with error message display
 - **Hover effects**: Border color changes, text color transitions
+
+#### Share System
+Each post tile has a Share button in the footer (between views count and save button).
+
+- **Native share** (`navigator.share`): On browsers supporting the Web Share API (iOS Safari, Chrome, etc.), tapping Share opens the native OS share sheet with the post URL. The promise resolves when the user completes or dismisses the share sheet.
+- **Custom share popup fallback**: When `navigator.share` is unavailable (e.g., Brave on Android with Shields enabled), a custom popup appears with:
+  - **WhatsApp**: Opens `https://api.whatsapp.com/send?text={url}`
+  - **Telegram**: Opens `https://t.me/share/url?url={url}`
+  - **Email**: Opens `mailto:?body={url}`
+  - **Copy Link**: Copies the post URL to clipboard with "Copied!" feedback
+- **Popup behavior**: Anchored near the share button, dismisses on outside tap, themed with CSS variables
+- **Click safety**: `event.stopPropagation()` prevents triggering the tile's open-in-Telegram action
+- **Feedback**: Button label briefly flashes "Shared" (native) or popup provides per-action feedback
 
 #### Enhanced Control System
 - **Manual Sync Button**: 
@@ -378,19 +443,19 @@ Serves the main application (`static/index.html`).
 ### 6. Data Flow
 
 #### Initialization and Configuration
-1. **Server Lifespan**: `load_dotenv()` loads `.env`, then the lifespan handler initializes `Database` and logs all users and feeds
+1. **Server Lifespan**: `load_dotenv()` loads `.env`, then the lifespan handler initializes `Database`
 2. **Auth Gate**: On page load, frontend checks `localStorage` for a JWT token; if missing, shows login form instead of the app
 3. **Login**: User authenticates via `POST /api/login`; on success, token, username, and `is_admin` flag are stored and `init()` is called
 4. **Frontend Startup**: `init()` function initializes multi-view interface (only called after successful auth)
-5. **Event Listeners**: Set up navigation, control buttons, feed management buttons, logout, and PWA service worker
+5. **Event Listeners**: Set up navigation, control buttons, feed management buttons, private channel loading, logout, and PWA service worker
 6. **Configuration**: Fetch `/api/config` (with auth header) to get `refresh_interval_minutes` and `scroll_speed`
 7. **Default View**: Load Main feed as default view
 
 #### View Data Management
 - **View Switching**: `showView(view)` function manages interface state
-  - **Main View**: Fetches from `/api/posts` (user's channels from Supabase)
+  - **Main View**: Fetches from `/api/posts` (user's channels from Supabase -- both public and private)
   - **Saved View**: Fetches from `/api/saved` (bookmarked posts)
-  - **Management View**: Loads feed management interface (and admin settings if admin)
+  - **Management View**: Loads feed management interface (and admin settings + private channels if admin)
 - **Auto-Refresh**: Periodic refresh of main feed only
 - **UI State Management**: Controls visibility of filters, buttons based on active view
 
@@ -404,14 +469,15 @@ Serves the main application (`static/index.html`).
    - `startScrolling()`: Auto-scroll with pause/resume functionality
 
 #### Management Interface Flow
-1. **Feed Loading**: Fetch user's feeds via `GET /api/feeds`
-2. **Feed Display**: Render feed list with remove buttons
+1. **Feed Loading**: Fetch user's feeds via `GET /api/feeds` (returns objects with `feed_url`, `is_private`, `admin_only`)
+2. **Feed Display**: Render feed list with badges (Private, Admin) and remove buttons
 3. **Add Feed**: Input field + Add button; calls `POST /api/feeds` with duplicate detection (409 → "Feed already exists" message)
 4. **Remove Feed**: Remove button calls `DELETE /api/feeds` and refreshes the list
-5. **Admin Settings** (admin only): Load settings via `GET /api/admin/config`, save via `POST /api/admin/config`
+5. **Private Channels** (admin only): "Load My Telegram Channels" button calls `GET /api/admin/channels`, displays available channels with "Add" buttons; adding sends `POST /api/feeds` with `is_private: true, admin_only: true`
+6. **Admin Settings** (admin only): Load settings via `GET /api/admin/config`, save via `POST /api/admin/config`
 
 #### PWA Integration
-1. **Service Worker**: Register minimal service worker for PWA compliance
+1. **Service Worker**: Register versioned service worker (v2.0) for PWA compliance; clears legacy caches on activation
 2. **Manifest**: Serve web app manifest with proper MIME types
 3. **Installation**: Support for "Add to Home Screen" functionality
 4. **Standalone Mode**: Full-screen experience without browser UI
@@ -440,15 +506,18 @@ Serves the main application (`static/index.html`).
 - **Admin user**: User with `id = 1` has admin privileges (can edit global settings)
 
 ##### `Feeds` Table
-| Column    | Type   | Description                              |
-|-----------|--------|------------------------------------------|
-| `user_id` | bigint | Foreign key to `Users.id` (NOT NULL)     |
-| `feed_url` | text  | Telegram channel URL associated with the user |
+| Column       | Type    | Description                                               |
+|--------------|---------|-----------------------------------------------------------|
+| `user_id`    | bigint  | Foreign key to `Users.id` (NOT NULL)                      |
+| `feed_url`   | text    | Telegram channel URL or numeric channel ID (for private)  |
+| `is_private` | boolean | Whether the channel requires Telethon API (default false) |
+| `admin_only` | boolean | Whether only admin can have this feed (default false)     |
 
 - **Foreign Key**: `user_id` references `Users.id` with `ON DELETE CASCADE`
 - **Index**: `idx_feeds_user_id` on `user_id` for join/RLS performance
 - **RLS**: Row Level Security requires appropriate policies for the API key to read/write rows
 - **Duplicate Prevention**: Application-level check before insert (query for existing `user_id` + `feed_url` pair)
+- **Migration SQL**: `ALTER TABLE feeds ADD COLUMN is_private boolean DEFAULT false; ALTER TABLE feeds ADD COLUMN admin_only boolean DEFAULT false;`
 
 ##### `save_for_later` Table
 | Column      | Type                     | Description                                    |
@@ -469,16 +538,15 @@ Serves the main application (`static/index.html`).
 - `get_all_feeds() -> list[dict]` (async): Queries all rows from the `Feeds` table
 - `authenticate_user(user_name, password) -> dict | None` (async): Queries the `Users` table for matching `user_name` and `User_password`; returns the user row or `None`
 - `get_feeds_for_user(user_id) -> list[dict]` (async): Queries `Feeds` for all rows matching the given `user_id`
-- `add_feed(user_id, feed_url) -> dict | None` (async): Checks for existing duplicate; if none, inserts a new row. Returns `None` if duplicate exists
+- `add_feed(user_id, feed_url, is_private=False, admin_only=False) -> dict | None` (async): Checks for existing duplicate; if none, inserts a new row with `is_private` and `admin_only` flags. Returns `None` if duplicate exists
 - `remove_feed(user_id, feed_url) -> bool` (async): Deletes the matching feed row. Returns `True` if a row was deleted
+- `is_feed_admin_only(feed_url) -> bool` (async): Checks if any feed row with this URL has `admin_only=true`
 - `get_saved_posts(user_id) -> list[dict]` (async): Queries `save_for_later` for all rows matching the user, parses JSON `saved_post` column, returns list of post dicts with `saved_at` from `created_at`
 - `save_post(user_id, post) -> dict | None` (async): Checks for duplicate (matching `channel` + `post_id` in existing saved posts); if none, inserts a new row with JSON-serialized post. Returns `None` if duplicate
 - `unsave_post(user_id, channel, post_id) -> bool` (async): Finds and deletes the saved post row matching `channel` and `post_id` for the user. Returns `True` if a row was deleted
 
 #### Startup Behavior
 - On server startup (via FastAPI lifespan), the `Database` is initialized
-- All users are fetched and logged (passwords excluded from log output for security; only `user_name` and `created_at` are logged)
-- All feeds are fetched and logged (`user_id` and `feed_url`)
 
 ### 8. Deployment Configuration
 
@@ -525,11 +593,13 @@ httpx              # Async HTTP client for Telegram scraping
 beautifulsoup4     # HTML parsing for post extraction
 supabase           # Supabase Python SDK (async client for PostgreSQL)
 python-dotenv      # Load environment variables from .env file
-telethon           # Telegram API client for channel search autocomplete
+telethon           # Telegram API client for channel search and private channel access
 ```
 
 **Key imports in `server.py`**:
 - `asyncio` - Concurrent channel fetching
+- `base64` - Encoding private channel media as data URIs
+- `io` - In-memory byte buffers for media downloads
 - `json` - Config file parsing
 - `logging` - Request/error logging
 - `re` - Image URL extraction from CSS
@@ -539,7 +609,7 @@ telethon           # Telegram API client for channel search autocomplete
 - `jwt` (PyJWT) - JWT token encoding/decoding for authentication
 - `fastapi` - Web framework, responses, static files, `Depends` for auth middleware
 - `dotenv.load_dotenv` - Environment variable loading
-- `telethon` - Telegram API client for channel search (TelegramClient, StringSession, functions.contacts.SearchRequest)
+- `telethon` - Telegram API client for channel search, private channel message fetching, and dialog listing (TelegramClient, StringSession, functions.contacts.SearchRequest, Channel, MessageMediaPhoto, MessageMediaDocument)
 - `database.Database` - Supabase database abstraction
 
 ## Technical Specifications
@@ -551,11 +621,13 @@ telethon           # Telegram API client for channel search autocomplete
 - **Parse errors**: `BeautifulSoup` parsing errors don't crash the server
 - **Empty responses**: Frontend shows "No posts to display" message
 - **Graceful degradation**: Missing data fields handled with fallbacks
+- **Private channel errors**: Failed Telethon fetches return empty list, errors logged
 
 ### Performance
 - **Async I/O**: `httpx.AsyncClient` with `asyncio.gather()` for concurrent requests
 - **No caching**: Fresh data on every request (trade-off: freshness vs speed)
 - **Timeout**: 15-second timeout per HTTP request
+- **Private channels**: Base64-encoded media increases response size but avoids separate media endpoints
 - **Frontend optimization**: 
   - `requestAnimationFrame` for smooth scrolling
   - Lazy image loading with `loading="lazy"`
@@ -567,8 +639,8 @@ telethon           # Telegram API client for channel search autocomplete
   - `require_auth` FastAPI dependency verifies JWT signature, algorithm, and expiry; returns decoded payload with `user_id` and `user_name`
   - Invalid/expired tokens return 401; frontend auto-redirects to login on 401
 - **Authorization**: Role-based access control
-  - Admin endpoints (`/api/admin/config`) check `user_id == 1` and return 403 for non-admin users
-  - Feed endpoints (`/api/feeds`) are scoped to the logged-in user's `user_id`
+  - Admin endpoints (`/api/admin/*`) check `user_id == 1` and return 403 for non-admin users
+  - Feed endpoints (`/api/feeds`) are scoped to the logged-in user's `user_id`; admin-only feeds rejected for non-admin users
   - Frontend hides admin-only UI elements based on `is_admin` flag from login response
 - **Session management**: JWT tokens stored in `localStorage` with 30-day expiry
   - JWT secret regenerated on server restart (invalidates all sessions)
@@ -582,9 +654,11 @@ telethon           # Telegram API client for channel search autocomplete
 - **Rate limiting**: None implemented (relies on Telegram's rate limiting)
 - **User-Agent spoofing**: Uses Chrome UA to avoid bot detection
 - **Supabase credentials**: Stored in `.env` file (excluded from git via `.gitignore`); loaded at runtime via `python-dotenv`
-- **Telegram API credentials**: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `TELEGRAM_SESSION` in `.env`; optional -- channel search autocomplete is disabled if not configured
-- **Password logging**: User passwords are intentionally excluded from startup log output
-- **Service worker**: Does not intercept fetch requests (avoids stripping `Authorization` headers on mobile browsers)
+- **Telegram API credentials**: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `TELEGRAM_SESSION` in `.env`; optional -- channel search and private channel access are disabled if not configured
+- **Telegram session management**: Separate sessions recommended for dev and prod to avoid revocation; `generate_session.py` script supports creating labeled sessions ("TGUpdates-Dev" / "TGUpdates-Prod")
+- **Startup logging**: No user or feed data is logged at startup
+- **Service worker**: Does not intercept fetch requests (avoids stripping `Authorization` headers on mobile browsers); versioned with cache-clearing on activation
+- **Cache control**: Root HTML response served with `no-cache, no-store, must-revalidate` to prevent stale frontend versions
 
 ### Browser Compatibility
 - **Target browsers**: Modern browsers with ES2017+ support
@@ -608,19 +682,21 @@ telethon           # Telegram API client for channel search autocomplete
 
 ## Known Limitations
 
-1. **Public channels only**: Cannot access private channels or channels requiring authentication
-2. **Rate limiting**: Subject to Telegram's rate limiting on public preview pages
-3. **Content restrictions**: Some media may not be accessible in web preview format
-4. **Network dependencies**: Requires outbound HTTP access to `t.me` (may be blocked in some hosting environments)
-5. **No real-time updates**: Relies on periodic polling rather than WebSocket/SSE
-6. **Memory usage**: All posts kept in memory (no pagination or cleanup)
-7. **Single-threaded**: FastAPI runs in single process (no horizontal scaling)
-8. **Keep-alive dependency**: Render.com free tier requires external pinging to prevent sleep
-9. **PWA offline limitations**: No offline functionality - requires internet connection
-10. **Supabase RLS**: Row Level Security must have appropriate policies for the API key to read/write the `Users` and `Feeds` tables
-11. **Plain text passwords**: Passwords are stored and compared as plain text in Supabase (no hashing)
-12. **JWT secret lifetime**: JWT secret is generated per server process; restarting the server invalidates all active sessions
-13. **Admin detection**: Admin role is determined by `user_id == 1` (hardcoded); no dynamic role management
+1. **Rate limiting**: Subject to Telegram's rate limiting on public preview pages and API calls
+2. **Content restrictions**: Some media may not be accessible in web preview format
+3. **Network dependencies**: Requires outbound HTTP access to `t.me` (may be blocked in some hosting environments)
+4. **No real-time updates**: Relies on periodic polling rather than WebSocket/SSE
+5. **Memory usage**: All posts kept in memory (no pagination or cleanup)
+6. **Single-threaded**: FastAPI runs in single process (no horizontal scaling)
+7. **Keep-alive dependency**: Render.com free tier requires external pinging to prevent sleep
+8. **PWA offline limitations**: No offline functionality - requires internet connection
+9. **Supabase RLS**: Row Level Security must have appropriate policies for the API key to read/write the `Users` and `Feeds` tables
+10. **Plain text passwords**: Passwords are stored and compared as plain text in Supabase (no hashing)
+11. **JWT secret lifetime**: JWT secret is generated per server process; restarting the server invalidates all active sessions
+12. **Admin detection**: Admin role is determined by `user_id == 1` (hardcoded); no dynamic role management
+13. **Private channel media**: Photos from private channels are base64-encoded in API responses, increasing payload size
+14. **Telegram session sharing**: Using the same Telegram session from multiple IPs simultaneously can cause revocation; separate dev/prod sessions recommended
+15. **Share API availability**: Some mobile browsers (e.g., Brave with Shields) strip `navigator.share`; custom share popup used as fallback
 
 ## Implementation Details
 
@@ -628,19 +704,21 @@ telethon           # Telegram API client for channel search autocomplete
 
 #### Backend (`server.py`)
 - `require_auth(request) -> dict`: FastAPI dependency that verifies JWT `Authorization: Bearer` header; returns decoded payload with `user_id` and `user_name`
-- `lifespan(app)`: Async context manager that initializes `Database` and logs users/feeds at startup
+- `lifespan(app)`: Async context manager that initializes `Database` and Telegram client at startup
 - `login(request)`: `POST /api/login` handler -- authenticates credentials, returns JWT token with `user_id`, and `is_admin` flag
-- `get_posts(request, user)`: `GET /api/posts` -- fetches user's feeds from Supabase, scrapes channels, returns sorted posts
-- `get_feeds(request, user)`: `GET /api/feeds` -- returns user's feed URLs from Supabase
-- `add_feed(request, user)`: `POST /api/feeds` -- adds a feed with duplicate check (409 on conflict)
+- `get_posts(request, user)`: `GET /api/posts` -- fetches user's feeds from Supabase, splits into public/private, scrapes public channels and fetches private channels via Telethon, returns merged sorted posts
+- `get_feeds(request, user)`: `GET /api/feeds` -- returns user's feeds as objects with `feed_url`, `is_private`, `admin_only`
+- `add_feed(request, user)`: `POST /api/feeds` -- adds a feed with duplicate check, admin-only restriction enforcement, and `is_private`/`admin_only` support (409 on conflict, 403 on admin-only violation)
 - `delete_feed(request, user)`: `DELETE /api/feeds` -- removes a feed for the user
 - `search_channels(request, q, user)`: `GET /api/search-channels` -- searches Telegram for public channels via Telethon `contacts.SearchRequest`
+- `get_admin_channels(request, user)`: `GET /api/admin/channels` -- lists all channels the Telethon session is a member of (admin-only)
 - `get_full_config(user)`: `GET /api/admin/config` -- returns config.json (admin-only, 403 for non-admin)
 - `update_config(request, user)`: `POST /api/admin/config` -- updates config.json (admin-only, 403 for non-admin)
 - `normalize_channel(raw: str) -> str`: Extracts channel name from various URL formats
 - `fetch_channel_html(client, channel) -> str | None`: Async HTTP request with error handling
 - `extract_image_url(style: str) -> str | None`: Regex extraction from CSS `url()` values
 - `parse_channel_posts(html: str, channel: str) -> list[dict]`: BeautifulSoup parsing logic
+- `fetch_private_channel_posts(tg, channel_id, limit) -> list[dict]`: Telethon-based message fetching with base64 media encoding
 - `load_config() -> dict`: JSON config file loader
 - `get_saved_posts(request, user)`: `GET /api/saved` -- returns the logged-in user's saved posts from Supabase
 - `save_post(request, user)`: `POST /api/saved` -- saves a post for the logged-in user in Supabase (duplicate check)
@@ -652,8 +730,9 @@ telethon           # Telegram API client for channel search autocomplete
 - `Database.get_all_feeds() -> list[dict]`: Fetches all rows from the `Feeds` table
 - `Database.authenticate_user(user_name, password) -> dict | None`: Queries `Users` for matching credentials
 - `Database.get_feeds_for_user(user_id) -> list[dict]`: Fetches feeds for a specific user
-- `Database.add_feed(user_id, feed_url) -> dict | None`: Inserts a feed with duplicate check; returns `None` if duplicate
+- `Database.add_feed(user_id, feed_url, is_private, admin_only) -> dict | None`: Inserts a feed with duplicate check and private/admin-only flags; returns `None` if duplicate
 - `Database.remove_feed(user_id, feed_url) -> bool`: Deletes a feed row; returns whether deletion occurred
+- `Database.is_feed_admin_only(feed_url) -> bool`: Checks if any feed with this URL is marked admin_only
 - `Database.get_saved_posts(user_id) -> list[dict]`: Fetches saved posts for a user from `save_for_later`, parses JSON
 - `Database.save_post(user_id, post) -> dict | None`: Saves a post with duplicate check; returns `None` if duplicate
 - `Database.unsave_post(user_id, channel, post_id) -> bool`: Deletes a saved post row; returns whether deletion occurred
@@ -670,9 +749,17 @@ telethon           # Telegram API client for channel search autocomplete
 - `startScrolling()`: Auto-scroll animation engine
 - `renderFilters()`: Dynamic, scrollable filter button generation
 - `renderPosts()`: Responsive post HTML generation with mobile support
-- `loadManagementInterface()`: Loads feed list and conditionally shows admin settings
-- `loadFeedList()`: Fetches and renders user's feeds from `/api/feeds`
+- `handleShareClick(evt, postUrl, btn)`: Click handler for share button with propagation control
+- `sharePost(postUrl, btn)`: Tries `navigator.share` first, falls back to custom share popup
+- `showSharePopup(postUrl, btn)`: Creates and positions the custom share popup with WhatsApp/Telegram/Email/Copy options
+- `hideSharePopup()`: Removes any open share popup and overlay
+- `copyTextFallback(text)`: Clipboard fallback using `execCommand('copy')` for older browsers
+- `flashShareButton(btn, label)`: Briefly changes the share button label for feedback
+- `loadManagementInterface()`: Loads feed list, private channels section (admin), and settings (admin)
+- `loadFeedList()`: Fetches and renders user's feeds from `/api/feeds` with Private/Admin badges
 - `addFeed()`: Adds a feed via `POST /api/feeds` with duplicate error display
+- `loadPrivateChannels()`: Fetches and displays available private channels from `GET /api/admin/channels` (admin only)
+- `addPrivateChannel(channelId, btn)`: Adds a private channel as admin-only feed via `POST /api/feeds`
 - `setupAutocomplete()`: Initializes channel search autocomplete on the feed input (debounce, keyboard navigation, blur handling)
 - `searchChannels(query)`: Calls `GET /api/search-channels?q=` and populates the autocomplete dropdown
 - `showAutocomplete(items)` / `hideAutocomplete()`: Renders or hides the autocomplete dropdown
@@ -690,16 +777,17 @@ telethon           # Telegram API client for channel search autocomplete
 ### File Structure
 ```
 /
-├── server.py              # FastAPI backend with PWA support and Supabase lifespan
-├── database.py           # Database class encapsulating Supabase async client
-├── config.json           # Global settings (refresh interval, max posts, scroll speed)
-├── .env                  # Environment variables (SUPABASE_URL, SUPABASE_KEY)
-├── requirements.txt      # Python dependencies
+├── server.py              # FastAPI backend with PWA support, Supabase lifespan, and Telethon integration
+├── database.py            # Database class encapsulating Supabase async client
+├── config.json            # Global settings (refresh interval, max posts, scroll speed)
+├── generate_session.py    # Telethon StringSession generator (dev/prod labeled sessions)
+├── .env                   # Environment variables (SUPABASE_URL, SUPABASE_KEY, TELEGRAM_*)
+├── requirements.txt       # Python dependencies
 ├── static/
-│   ├── index.html        # Complete frontend application with PWA
-│   ├── manifest.json     # PWA web app manifest
-│   ├── sw.js            # Minimal service worker for PWA compliance
-│   └── icons/           # PWA application icons
+│   ├── index.html         # Complete frontend application with PWA and share system
+│   ├── manifest.json      # PWA web app manifest
+│   ├── sw.js              # Versioned service worker (v2.0) with cache-clearing
+│   └── icons/             # PWA application icons
 │       ├── icon-72x72.png
 │       ├── icon-96x96.png
 │       ├── icon-128x128.png
@@ -711,7 +799,7 @@ telethon           # Telegram API client for channel search autocomplete
 ├── .github/
 │   └── workflows/
 │       └── keep-alive.yml # GitHub Actions keep-alive workflow
-└── TelegramUpdates.md    # This comprehensive documentation
+└── TelegramUpdates.md     # This comprehensive documentation
 ```
 
 ## Progressive Web App (PWA) Features
@@ -724,16 +812,17 @@ telethon           # Telegram API client for channel search autocomplete
 
 ### PWA Configuration
 - **Web App Manifest**: Complete metadata for installation
-- **Service Worker**: Minimal worker for PWA compliance (no offline caching, no fetch interception)
+- **Service Worker**: Versioned worker (v2.0) for PWA compliance; clears legacy caches on activation (no offline caching, no fetch interception)
 - **Meta Tags**: Comprehensive mobile and desktop PWA support
 - **Icons**: Full icon set (72px to 512px) for all platforms
 - **Theme Integration**: Consistent dark theme across installed app
 
 ### Technical Implementation
 - **Manifest Serving**: Proper MIME type (`application/manifest+json`)
-- **Service Worker**: Minimal implementation for PWA recognition; does not intercept fetch events (avoids stripping `Authorization` headers on mobile)
+- **Service Worker**: Versioned with `SW_VERSION` constant; `skipWaiting()` on install, cache-clearing + `clients.claim()` on activate; does not intercept fetch events (avoids stripping `Authorization` headers on mobile)
 - **Icon Generation**: Automated icon creation from SVG template
 - **Mobile Optimization**: Viewport settings for full-screen experience
+- **Cache Busting**: Root HTML served with `no-cache` headers; service worker version bump forces re-activation
 
 ## Management Interface
 
@@ -742,13 +831,23 @@ telethon           # Telegram API client for channel search autocomplete
 - **Add Feed**: Text input with autocomplete + Add button; calls `POST /api/feeds` with server-side duplicate prevention
 - **Channel Autocomplete**: As the user types in the feed input, the frontend queries `GET /api/search-channels?q=` (debounced 300ms) and displays a dropdown of matching public Telegram channels with title, @username, and member count. Selecting a result populates the input with the channel URL. Keyboard navigation (Arrow Up/Down, Enter, Escape) is supported. Autocomplete is skipped when the input looks like a URL.
 - **Remove Feed**: Remove button next to each feed URL; calls `DELETE /api/feeds`
+- **Feed Badges**: Each feed displays badges indicating its type:
+  - **Private** (blue): Channel fetched via Telethon API
+  - **Admin** (red): Channel restricted to admin user
 - **Duplicate Detection**: Server returns 409 if feed already exists; frontend displays "Feed already exists" error
 - **Real-time Updates**: Feed list refreshes immediately after add/remove operations
+
+### Private Channels (Admin Only)
+- **Discovery**: "Load My Telegram Channels" button fetches all channels the Telethon session is a member of via `GET /api/admin/channels`
+- **Channel List**: Shows channel title, @username (if any), and member count
+- **Add Button**: Each channel has an "Add" button that calls `POST /api/feeds` with `is_private: true, admin_only: true`
+- **Already Added**: Channels already in the feed list show "Added" instead of the button
+- **Requirements**: Telethon client must be connected (requires `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION`)
 
 ### Appearance (All Users)
 - **Theme Toggle**: Light/Dark buttons in the Management panel
 - **Persistence**: Stored in `localStorage` (key: `theme`), no server round-trip
-- **Default**: Dark theme if no preference is stored
+- **Default**: Light theme if no preference is stored
 - **Light Theme**: Perplexity AI-inspired color scheme (Paper White, Offblack text, True Turquoise accents)
 
 ### Settings Management (Admin Only, `user_id = 1`)
