@@ -56,7 +56,7 @@
 
     [data-theme="light"] {
       --bg: #FBFAF4;
-      --card-bg: #F5F4EE;
+      --card-bg: #F1EFE8;
       --text: #091717;
       --text-secondary: #5C6B6B;
       --accent: #20808D;
@@ -403,10 +403,78 @@
     .post-views { display: flex; align-items: center; gap: 4px; }
     .post-views svg { width: 18px; height: 18px; fill: var(--text-secondary); }
 
-    .post-open-link {
-      color: var(--accent); text-decoration: none; font-weight: 500;
+    .post-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-left: auto;
     }
-    .post-open-link:hover { text-decoration: underline; }
+
+    .share-btn {
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      color: var(--accent);
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 1rem;
+      font-weight: 500;
+      padding: 0;
+      transition: opacity 0.15s;
+    }
+    .share-btn:hover { opacity: 0.82; }
+    .share-btn svg { width: 17px; height: 17px; fill: currentColor; }
+
+    .share-popup-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 999;
+    }
+
+    .share-popup {
+      position: fixed;
+      z-index: 1000;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.25);
+      padding: 6px 0;
+      min-width: 200px;
+      animation: sharePopupIn 0.15s ease-out;
+    }
+
+    @keyframes sharePopupIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .share-popup-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 16px;
+      color: var(--text);
+      text-decoration: none;
+      font-size: 0.92rem;
+      font-weight: 500;
+      cursor: pointer;
+      border: none;
+      background: transparent;
+      width: 100%;
+      text-align: left;
+      transition: background 0.1s;
+    }
+
+    .share-popup-item:hover {
+      background: var(--accent-light);
+    }
+
+    .share-popup-item svg {
+      width: 20px;
+      height: 20px;
+      flex-shrink: 0;
+    }
 
     .loading-container {
       width: 100%; height: 100%;
@@ -1256,6 +1324,129 @@
       return tmp.innerHTML;
     }
 
+    function copyTextFallback(text) {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.setAttribute('readonly', '');
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      const copied = document.execCommand('copy');
+      document.body.removeChild(area);
+      return copied;
+    }
+
+    function flashShareButton(btn, label) {
+      if (!btn) return;
+      const textEl = btn.querySelector('.share-btn-label');
+      if (!textEl) return;
+      const original = textEl.textContent;
+      textEl.textContent = label;
+      setTimeout(() => {
+        textEl.textContent = original;
+      }, 1200);
+    }
+
+    function hideSharePopup() {
+      const old = document.querySelector('.share-popup');
+      const oldOverlay = document.querySelector('.share-popup-overlay');
+      if (old) old.remove();
+      if (oldOverlay) oldOverlay.remove();
+    }
+
+    function showSharePopup(postUrl, btn) {
+      hideSharePopup();
+
+      const encoded = encodeURIComponent(postUrl);
+
+      const items = [
+        { label: 'WhatsApp', icon: '<svg viewBox="0 0 24 24" fill="#25D366"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347zM12.05 21.785h-.01a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.981.998-3.648-.235-.374A9.86 9.86 0 0 1 2.13 12.028C2.13 6.558 6.558 2.13 12.05 2.13c2.66 0 5.16 1.036 7.04 2.917a9.897 9.897 0 0 1 2.91 7.05c-.004 5.472-4.432 9.9-9.9 9.9z"/></svg>', url: `https://api.whatsapp.com/send?text=${encoded}` },
+        { label: 'Telegram', icon: '<svg viewBox="0 0 24 24" fill="#229ED9"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.2-.08-.06-.19-.04-.27-.02-.12.03-1.99 1.27-5.62 3.72-.53.36-1.01.54-1.44.53-.47-.01-1.38-.27-2.06-.49-.83-.27-1.49-.42-1.43-.88.03-.24.37-.49 1.02-.74 3.99-1.74 6.65-2.89 7.99-3.45 3.8-1.58 4.59-1.86 5.1-1.87.11 0 .37.03.54.17.14.12.18.28.2.45-.01.06.01.24 0 .38z"/></svg>', url: `https://t.me/share/url?url=${encoded}` },
+        { label: 'Email', icon: '<svg viewBox="0 0 24 24" fill="var(--text-secondary)"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>', url: `mailto:?body=${encoded}` },
+        { label: 'Copy Link', icon: '<svg viewBox="0 0 24 24" fill="var(--text-secondary)"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>', action: 'copy' }
+      ];
+
+      const popup = document.createElement('div');
+      popup.className = 'share-popup';
+
+      items.forEach(item => {
+        if (item.action === 'copy') {
+          const btn2 = document.createElement('button');
+          btn2.className = 'share-popup-item';
+          btn2.innerHTML = item.icon + `<span>${item.label}</span>`;
+          btn2.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            try {
+              if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(postUrl);
+              } else {
+                copyTextFallback(postUrl);
+              }
+              btn2.querySelector('span').textContent = 'Copied!';
+              setTimeout(() => hideSharePopup(), 800);
+            } catch (_) {
+              btn2.querySelector('span').textContent = 'Failed';
+            }
+          });
+          popup.appendChild(btn2);
+        } else {
+          const a = document.createElement('a');
+          a.className = 'share-popup-item';
+          a.href = item.url;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.innerHTML = item.icon + `<span>${item.label}</span>`;
+          a.addEventListener('click', (e) => {
+            e.stopPropagation();
+            setTimeout(() => hideSharePopup(), 300);
+          });
+          popup.appendChild(a);
+        }
+      });
+
+      document.body.appendChild(popup);
+
+      const rect = btn.getBoundingClientRect();
+      const popupRect = popup.getBoundingClientRect();
+      let top = rect.top - popupRect.height - 8;
+      let left = rect.left + rect.width / 2 - popupRect.width / 2;
+      if (top < 8) top = rect.bottom + 8;
+      if (left < 8) left = 8;
+      if (left + popupRect.width > window.innerWidth - 8) left = window.innerWidth - popupRect.width - 8;
+      popup.style.top = top + 'px';
+      popup.style.left = left + 'px';
+
+      const overlay = document.createElement('div');
+      overlay.className = 'share-popup-overlay';
+      overlay.addEventListener('click', (e) => {
+        e.stopPropagation();
+        hideSharePopup();
+      });
+      document.body.insertBefore(overlay, popup);
+    }
+
+    function handleShareClick(evt, postUrl, btn) {
+      if (evt) {
+        evt.stopPropagation();
+      }
+      sharePost(postUrl, btn);
+    }
+
+    async function sharePost(postUrl, btn) {
+      if (navigator.share) {
+        try {
+          await navigator.share({ url: postUrl });
+          flashShareButton(btn, 'Shared');
+          return;
+        } catch (e) {
+          if (e && e.name === 'AbortError') return;
+        }
+      }
+
+      showSharePopup(postUrl, btn);
+    }
+
     function renderPosts() {
       const container = document.getElementById('postsContainer');
       let filtered = activeFilter ? allPosts.filter(p => p.channel === activeFilter) : [...allPosts];
@@ -1322,10 +1513,15 @@
                   <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
                   ${post.views}
                 </div>
-                <button class="save-btn ${isSaved ? 'saved' : ''}" data-channel="${post.channel}" data-postid="${post.post_id}" onclick="event.stopPropagation(); toggleSave(this)" title="${isSaved ? 'Remove from saved' : 'Save for later'}">
-                  ${isSaved ? bookmarkFilled : bookmarkOutline}
-                </button>
-                <a class="post-open-link" href="${post.post_url}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Open in Telegram</a>
+                <div class="post-actions">
+                  <button class="share-btn" onclick="handleShareClick(event, '${post.post_url}', this)" title="Share post">
+                    <svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7a2.52 2.52 0 0 0 0-1.39l7-4.11A2.99 2.99 0 1 0 15 5a2.98 2.98 0 0 0 .05.54l-7.1 4.17a3 3 0 1 0 0 4.58l7.09 4.17c-.03.17-.04.35-.04.54a3 3 0 1 0 3-2.92z"/></svg>
+                    <span class="share-btn-label">Share</span>
+                  </button>
+                  <button class="save-btn ${isSaved ? 'saved' : ''}" data-channel="${post.channel}" data-postid="${post.post_id}" onclick="event.stopPropagation(); toggleSave(this)" title="${isSaved ? 'Remove from saved' : 'Save for later'}">
+                    ${isSaved ? bookmarkFilled : bookmarkOutline}
+                  </button>
+                </div>
               </div>
             </div>
           </div>`;
