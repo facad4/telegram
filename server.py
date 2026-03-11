@@ -193,13 +193,18 @@ def parse_channel_posts(html: str, channel: str) -> list[dict]:
     return posts
 
 
-async def fetch_private_channel_posts(
-    tg: TelegramClient, channel_id: int, limit: int = 30,
+async def fetch_channel_posts_telethon(
+    tg: TelegramClient, channel_ref: int | str, limit: int = 30,
 ) -> list[dict]:
-    """Fetch recent posts from a private channel via Telethon API."""
+    """Fetch recent posts from a channel via Telethon API.
+
+    channel_ref: username (str) for public channels, numeric ID (int) for private.
+    Returns full message text (no truncation unlike web preview scraping).
+    """
     try:
-        entity = await tg.get_entity(channel_id)
-        channel_title = getattr(entity, "title", str(channel_id))
+        entity = await tg.get_entity(channel_ref)
+        channel_title = getattr(entity, "title", str(channel_ref))
+        username = getattr(entity, "username", None)
 
         channel_photo = None
         try:
@@ -217,7 +222,7 @@ async def fetch_private_channel_posts(
                 continue
 
             text_plain = msg.text or ""
-            text_html = f"<div>{text_plain}</div>" if text_plain else ""
+            text_html = f"<div>{text_plain.replace(chr(10), '<br>')}</div>" if text_plain else ""
             views = str(msg.views) if msg.views else ""
             datetime_str = msg.date.isoformat() if msg.date else ""
 
@@ -233,14 +238,20 @@ async def fetch_private_channel_posts(
                 except Exception:
                     pass
 
-            real_channel_id = getattr(entity, "id", channel_id)
+            if username:
+                channel_name = username
+                post_url = f"https://t.me/{username}/{msg.id}"
+            else:
+                real_id = getattr(entity, "id", channel_ref)
+                channel_name = str(real_id)
+                post_url = f"https://t.me/c/{real_id}/{msg.id}"
 
             posts.append({
-                "channel": str(real_channel_id),
+                "channel": channel_name,
                 "channel_title": channel_title,
                 "channel_photo": channel_photo,
                 "post_id": str(msg.id),
-                "post_url": f"https://t.me/c/{real_channel_id}/{msg.id}",
+                "post_url": post_url,
                 "text_html": text_html,
                 "text_plain": text_plain,
                 "views": views,
@@ -252,7 +263,7 @@ async def fetch_private_channel_posts(
 
         return posts
     except Exception as e:
-        logger.error("Failed to fetch private channel %s: %s", channel_id, e)
+        logger.error("Failed to fetch channel %s via Telethon: %s", channel_ref, e)
         return []
 
 
@@ -291,27 +302,29 @@ async def get_posts(request: Request, user: dict = Depends(require_auth)):
     public_feeds = [f for f in feeds if not f.get("is_private") and f.get("feed_url")]
     private_feeds = [f for f in feeds if f.get("is_private") and f.get("feed_url")]
 
-    public_channels = [normalize_channel(f["feed_url"]) for f in public_feeds]
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        results = await asyncio.gather(
-            *[fetch_channel_html(client, ch) for ch in public_channels]
-        )
-
-    all_posts = []
-    for ch, html in zip(public_channels, results):
-        if html:
-            all_posts.extend(parse_channel_posts(html, ch))
-
     tg: TelegramClient | None = request.app.state.telegram
-    if tg and private_feeds:
-        private_results = await asyncio.gather(
-            *[
-                fetch_private_channel_posts(tg, int(f["feed_url"]), limit=max_posts)
-                for f in private_feeds
-            ]
-        )
-        for posts in private_results:
-            all_posts.extend(posts)
+    all_posts = []
+
+    if tg:
+        telethon_tasks = []
+        for f in public_feeds:
+            username = normalize_channel(f["feed_url"])
+            telethon_tasks.append(fetch_channel_posts_telethon(tg, username, limit=max_posts))
+        for f in private_feeds:
+            telethon_tasks.append(fetch_channel_posts_telethon(tg, int(f["feed_url"]), limit=max_posts))
+        if telethon_tasks:
+            results = await asyncio.gather(*telethon_tasks)
+            for posts in results:
+                all_posts.extend(posts)
+    else:
+        public_channels = [normalize_channel(f["feed_url"]) for f in public_feeds]
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            results = await asyncio.gather(
+                *[fetch_channel_html(client, ch) for ch in public_channels]
+            )
+        for ch, html in zip(public_channels, results):
+            if html:
+                all_posts.extend(parse_channel_posts(html, ch))
 
     all_posts.sort(key=lambda p: p["datetime"], reverse=True)
     return all_posts[:max_posts]
