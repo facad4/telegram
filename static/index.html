@@ -558,7 +558,7 @@
 
       /* Header adjustments for mobile */
       .header {
-        padding: 0;
+        padding: 0 8px;
         gap: 0;
         overflow-x: hidden;
         justify-content: stretch;
@@ -575,18 +575,29 @@
         display: none;
       }
 
-      .nav-link,
-      .control-btn,
-      .filter-wrapper,
-      .logout-btn {
-        flex: 1 1 0;
-        display: flex;
+      .header .control-btn span {
+        display: none;
+      }
+
+      .header .nav-link,
+      .header .control-btn,
+      .header .filter-wrapper,
+      .header .logout-btn {
+        flex: 1 1 0 !important;
+        display: flex !important;
         align-items: center;
         justify-content: center;
-        padding: 4px 0;
-        border: none;
+        padding: 4px 0 !important;
+        border: none !important;
         min-width: 0;
         white-space: nowrap;
+      }
+
+      /* Keep top-bar spacing stable while tapping icons on mobile */
+      .header .control-btn:active,
+      .header .nav-link:active,
+      .header .logout-btn:active {
+        transform: none;
       }
 
       .filter-wrapper {
@@ -1667,23 +1678,39 @@
       
       if (view === 'main') {
         document.getElementById('mainFeedLink').classList.add('active');
-        document.getElementById('scrollViewport').style.display = 'flex';
+        document.getElementById('scrollViewport').style.display = '';
         document.getElementById('managementContainer').style.display = 'none';
-        controlButtons.style.display = 'flex';
+        document.getElementById('managementContainer').style.marginTop = '';
+        controlButtons.style.display = '';
         filterBar.style.display = '';
+        document.getElementById('syncBtn').style.display = '';
+        document.getElementById('orderBtn').style.display = '';
+        document.getElementById('stopScrollBtn').style.display = '';
+        document.querySelector('.filter-wrapper').style.display = '';
         fetchPosts();
       } else if (view === 'saved') {
-        document.getElementById('scrollViewport').style.display = 'flex';
+        document.getElementById('scrollViewport').style.display = '';
         document.getElementById('managementContainer').style.display = 'none';
-        controlButtons.style.display = 'flex';
+        document.getElementById('managementContainer').style.marginTop = '';
+        controlButtons.style.display = '';
         filterBar.style.display = '';
+        document.getElementById('syncBtn').style.display = '';
+        document.getElementById('orderBtn').style.display = '';
+        document.getElementById('stopScrollBtn').style.display = '';
+        document.querySelector('.filter-wrapper').style.display = '';
         fetchSavedPosts();
       } else if (view === 'management') {
         showHeader();
         document.getElementById('scrollViewport').style.display = 'none';
-        document.getElementById('managementContainer').style.display = 'block';
-        controlButtons.style.display = 'flex';
+        const mgmt = document.getElementById('managementContainer');
+        mgmt.style.display = 'block';
+        mgmt.style.marginTop = (autoHideHeader && isMobileWidth()) ? '44px' : '';
+        controlButtons.style.display = '';
         filterBar.style.display = 'none';
+        document.getElementById('syncBtn').style.display = 'none';
+        document.getElementById('orderBtn').style.display = 'none';
+        document.getElementById('stopScrollBtn').style.display = 'none';
+        document.querySelector('.filter-wrapper').style.display = 'none';
         loadManagementInterface();
       }
     }
