@@ -12,3 +12,4 @@ icon_env/
 PWA_README.md
 start.sh
 .env
+groq_test.py
