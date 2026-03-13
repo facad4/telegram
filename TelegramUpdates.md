@@ -328,7 +328,7 @@ Serves the main application (`static/index.html`) with `Cache-Control: no-cache,
 - **Navigation Layout**: Streamlined header without logo
   - **Left side**: Main navigation link + control buttons
   - **Right side**: Filter bar, status, settings icon, logout button
-- **Context-Aware UI**: Different controls shown based on current view
+- **Context-Aware UI**: Different controls shown based on current view; management view hides feed-specific controls (sync, sort, stop/resume, filter) on mobile
 
 #### Layout Structure
 - **Login Overlay**: Full-screen centered login form (hidden when authenticated)
@@ -357,6 +357,8 @@ Serves the main application (`static/index.html`) with `Cache-Control: no-cache,
 - **Spacing Optimization**:
   - Reduced horizontal padding (12vw → 4vw)
   - Optimized content padding (28px 48px → 20px 16px)
+  - Header edge padding: 8px horizontal for symmetric spacing between first/last icons and screen edges
+- **View-Aware Header**: Management view hides feed-specific controls (sync, sort, stop, filter) to declutter the mobile header
 - **Auto-scroll Preserved**: Full functionality maintained in mobile mode
 
 #### Auto-scrolling Implementation
@@ -452,10 +454,10 @@ Each post tile has a Share button in the footer (between views count and save bu
 7. **Default View**: Load Main feed as default view
 
 #### View Data Management
-- **View Switching**: `showView(view)` function manages interface state
-  - **Main View**: Fetches from `/api/posts` (user's channels from Supabase -- both public and private)
-  - **Saved View**: Fetches from `/api/saved` (bookmarked posts)
-  - **Management View**: Loads feed management interface (and admin settings + private channels if admin)
+- **View Switching**: `showView(view)` function manages interface state; resets inline display styles to avoid overriding CSS defaults (e.g. `display: contents` on mobile)
+  - **Main View**: Fetches from `/api/posts` (user's channels from Supabase -- both public and private); restores all control buttons and filter
+  - **Saved View**: Fetches from `/api/saved` (bookmarked posts); restores all control buttons and filter
+  - **Management View**: Loads feed management interface (and admin settings + private channels if admin); hides sync, sort, stop/resume buttons and filter wrapper
 - **Auto-Refresh**: Periodic refresh of main feed only
 - **UI State Management**: Controls visibility of filters, buttons based on active view
 
@@ -745,7 +747,7 @@ telethon           # Telegram API client for channel search and private channel 
 - `showApp()` / `showLogin()`: Toggle visibility between login overlay and app container
 - `fetchConfig()`: Loads client settings from `/api/config`
 - `fetchPosts()`: Main feed data fetching with loading states
-- `showView(view)`: Multi-view navigation and state management (`main`, `saved`, `management`)
+- `showView(view)`: Multi-view navigation and state management (`main`, `saved`, `management`); resets inline display styles to preserve CSS defaults; hides feed-specific controls in management view
 - `startScrolling()`: Auto-scroll animation engine
 - `renderFilters()`: Dynamic, scrollable filter button generation
 - `renderPosts()`: Responsive post HTML generation with mobile support
