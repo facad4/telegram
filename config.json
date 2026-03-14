@@ -4,5 +4,5 @@
   "scroll_speed": 50,
   "media_concurrency": 20,
   "ai_provider": "mistral",
-  "ai_model": "mistral-small-2506"
+  "ai_model": "mistral-large-latest"
 }

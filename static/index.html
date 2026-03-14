@@ -1944,7 +1944,7 @@
           const provider = config.ai_provider || 'gemini';
           document.getElementById('aiProvider').value = provider;
           updateAiModelOptions(provider);
-          document.getElementById('aiModel').value = config.ai_model || 'mistral-small-2506';
+          document.getElementById('aiModel').value = config.ai_model || 'mistral-large-latest';
         } catch (e) {
           console.error('Failed to load admin config:', e);
         }

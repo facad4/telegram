@@ -492,7 +492,7 @@ async def get_posts(request: Request, user: dict = Depends(require_auth)):
 async def get_top_posts(request: Request, user: dict = Depends(require_auth)):
     config = load_config()
     ai_provider = config.get("ai_provider", "mistral")
-    ai_model = config.get("ai_model", "mistral-small-2506")
+    ai_model = config.get("ai_model", "mistral-large-latest")
 
     if ai_provider == "gemini" and not GOOGLE_API_KEY:
         return JSONResponse(status_code=503, content={"detail": "AI ranking not configured (GOOGLE_API_KEY missing)"})
