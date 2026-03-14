@@ -30,6 +30,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 logging.getLogger("telethon").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 JWT_SECRET = secrets.token_hex(32)
 JWT_ALGORITHM = "HS256"
@@ -84,7 +85,8 @@ app = FastAPI(lifespan=lifespan)
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 TOP10_PROMPT_PATH = Path(__file__).parent / "top10_prompt.md"
-XAI_API_KEY = os.environ.get("XAI_API_KEY") or os.environ.get("GROK_API_KEY", "")
+GROQ_API_KEY = os.environ.get("GROK_API_KEY", "")
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 AVATAR_CACHE_DIR = Path(__file__).parent / "avatar_cache"
 AVATAR_CACHE_DIR.mkdir(exist_ok=True)
 THUMB_CACHE_DIR = Path(__file__).parent / "thumb_cache"
@@ -134,6 +136,96 @@ async def fetch_channel_html(client: httpx.AsyncClient, channel: str) -> str | N
 def extract_image_url(style: str) -> str | None:
     match = re.search(r"url\('([^']+)'\)", style)
     return match.group(1) if match else None
+
+
+def _merge_grouped_posts(posts: list[dict]) -> list[dict]:
+    """Merge consecutive posts with sequential IDs that form a media group.
+
+    Telegram renders grouped media (albums) as separate messages where only
+    the last item carries the text.  We detect runs of consecutive numeric
+    post_ids, collect the shared text/link-preview from whichever item has it,
+    and emit a single merged post per group (keeping the first media).
+    """
+    if not posts:
+        return posts
+
+    groups: list[list[dict]] = [[posts[0]]]
+    for prev, cur in zip(posts, posts[1:]):
+        try:
+            if int(cur["post_id"]) == int(prev["post_id"]) + 1:
+                groups[-1].append(cur)
+                continue
+        except (ValueError, TypeError):
+            pass
+        groups.append([cur])
+
+    merged: list[dict] = []
+    for group in groups:
+        if len(group) == 1:
+            merged.append(group[0])
+            continue
+
+        has_empty = any(not p["text_html"] for p in group)
+        if not has_empty:
+            merged.extend(group)
+            continue
+
+        text_post = next((p for p in group if p["text_html"]), None)
+        if text_post is None:
+            merged.extend(group)
+            continue
+
+        base = group[0].copy()
+        base["text_html"] = text_post["text_html"]
+        base["text_plain"] = text_post["text_plain"]
+        if not base["views"] and text_post["views"]:
+            base["views"] = text_post["views"]
+        if not base["datetime"] and text_post["datetime"]:
+            base["datetime"] = text_post["datetime"]
+        if text_post["link_preview"] and not base["link_preview"]:
+            base["link_preview"] = text_post["link_preview"]
+        merged.append(base)
+
+    return merged
+
+
+def _merge_telethon_grouped(posts: list[dict]) -> list[dict]:
+    """Merge Telethon messages that share a grouped_id (media albums).
+
+    Keeps the first post's media and copies text from whichever item has it.
+    Strips the internal _grouped_id key from the output.
+    """
+    from collections import OrderedDict
+    groups: OrderedDict[int, list[dict]] = OrderedDict()
+    ungrouped: list[tuple[int, dict]] = []
+
+    for i, p in enumerate(posts):
+        gid = p.get("_grouped_id")
+        if gid is not None:
+            groups.setdefault(gid, []).append((i, p))
+        else:
+            ungrouped.append((i, p))
+
+    merged_indexed: list[tuple[int, dict]] = []
+    for gid, items in groups.items():
+        text_post = next((p for _, p in items if p["text_html"]), None)
+        base = items[0][1].copy()
+        if text_post:
+            base["text_html"] = text_post["text_html"]
+            base["text_plain"] = text_post["text_plain"]
+        if not base["views"]:
+            donor = next((p for _, p in items if p["views"]), None)
+            if donor:
+                base["views"] = donor["views"]
+        base.pop("_grouped_id", None)
+        merged_indexed.append((items[0][0], base))
+
+    for i, p in ungrouped:
+        p.pop("_grouped_id", None)
+        merged_indexed.append((i, p))
+
+    merged_indexed.sort(key=lambda x: x[0])
+    return [p for _, p in merged_indexed]
 
 
 def parse_channel_posts(html: str, channel: str) -> list[dict]:
@@ -199,9 +291,10 @@ def parse_channel_posts(html: str, channel: str) -> list[dict]:
             "photo_url": photo_url,
             "video_thumb": video_thumb,
             "link_preview": link_preview,
+            "channel_subscribers": None,
         })
 
-    return posts
+    return _merge_grouped_posts(posts)
 
 
 async def _download_thumb(
@@ -276,7 +369,7 @@ async def fetch_channel_posts_telethon(
         ]
         photo_results = await asyncio.gather(*download_tasks)
 
-        posts = []
+        raw_posts = []
         for msg, photo_url in zip(filtered, photo_results):
             text_plain = msg.text or ""
             text_html = f"<div>{text_plain.replace(chr(10), '<br>')}</div>" if text_plain else ""
@@ -288,7 +381,7 @@ async def fetch_channel_posts_telethon(
             else:
                 post_url = f"https://t.me/c/{real_id}/{msg.id}"
 
-            posts.append({
+            raw_posts.append({
                 "channel": channel_name,
                 "channel_title": channel_title,
                 "channel_photo": channel_photo,
@@ -301,8 +394,11 @@ async def fetch_channel_posts_telethon(
                 "photo_url": photo_url,
                 "video_thumb": None,
                 "link_preview": None,
+                "channel_subscribers": getattr(entity, "participants_count", None),
+                "_grouped_id": getattr(msg, "grouped_id", None),
             })
 
+        posts = _merge_telethon_grouped(raw_posts)
         return posts
     except Exception as e:
         logger.error("Failed to fetch channel %s via Telethon: %s", channel_ref, e)
@@ -393,8 +489,14 @@ async def get_posts(request: Request, user: dict = Depends(require_auth)):
 
 @app.post("/api/top-posts")
 async def get_top_posts(request: Request, user: dict = Depends(require_auth)):
-    if not XAI_API_KEY:
-        return JSONResponse(status_code=503, content={"detail": "AI ranking not configured (XAI_API_KEY missing)"})
+    config = load_config()
+    ai_provider = config.get("ai_provider", "gemini")
+    ai_model = config.get("ai_model", "gemini-2.0-flash-lite")
+
+    if ai_provider == "gemini" and not GOOGLE_API_KEY:
+        return JSONResponse(status_code=503, content={"detail": "AI ranking not configured (GOOGLE_API_KEY missing)"})
+    if ai_provider == "groq" and not GROQ_API_KEY:
+        return JSONResponse(status_code=503, content={"detail": "AI ranking not configured (GROQ_API_KEY missing)"})
 
     body = await request.json()
     posts = body.get("posts", [])
@@ -410,12 +512,18 @@ async def get_top_posts(request: Request, user: dict = Depends(require_auth)):
 
     slim_posts = []
     for i, p in enumerate(posts):
+        views_raw = re.sub(r"[^\d]", "", p.get("views", "0")) or "0"
+        views_num = int(views_raw)
+        subs = p.get("channel_subscribers") or 0
+        engagement = round(views_num / subs * 100, 1) if subs > 0 else 0
+
         entry = {
             "i": i,
             "ch": p.get("channel", ""),
             "t": (p.get("text_plain") or "")[:200],
             "dt": p.get("datetime", ""),
             "v": p.get("views", ""),
+            "e": engagement,
             "m": bool(p.get("photo_url") or p.get("video_thumb")),
         }
         lp = p.get("link_preview")
@@ -423,37 +531,66 @@ async def get_top_posts(request: Request, user: dict = Depends(require_auth)):
             entry["lp"] = lp["title"][:80]
         slim_posts.append(entry)
 
+    user_content = json.dumps(slim_posts, ensure_ascii=False)
+
     async with httpx.AsyncClient(timeout=60.0) as client:
         try:
-            resp = await client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {XAI_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "llama-3.3-70b-versatile",
-                    "temperature": 0.2,
-                    "messages": [
-                        {"role": "system", "content": prompt_text},
-                        {"role": "user", "content": json.dumps(slim_posts, ensure_ascii=False)},
-                    ],
-                },
-            )
-            resp.raise_for_status()
+            if ai_provider == "gemini":
+                resp = await client.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{ai_model}:generateContent?key={GOOGLE_API_KEY}",
+                    headers={"Content-Type": "application/json"},
+                    json={
+                        "contents": [
+                            {"role": "user", "parts": [{"text": prompt_text + "\n\n" + user_content}]},
+                        ],
+                        "generationConfig": {
+                            "temperature": 0.2,
+                            "responseMimeType": "application/json",
+                        },
+                    },
+                )
+            else:
+                resp = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {GROQ_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": ai_model,
+                        "temperature": 0.2,
+                        "messages": [
+                            {"role": "system", "content": prompt_text},
+                            {"role": "user", "content": user_content},
+                        ],
+                    },
+                )
+            if resp.status_code != 200:
+                error_body = resp.text[:1000]
+                logger.error("AI API error (%s/%s) HTTP %s: %s", ai_provider, ai_model, resp.status_code, error_body)
+                detail = f"AI service returned {resp.status_code}"
+                try:
+                    err_json = resp.json()
+                    detail = err_json.get("error", {}).get("message", detail)
+                except Exception:
+                    pass
+                return JSONResponse(status_code=502, content={"detail": detail})
         except Exception as e:
-            logger.error("Grok API request failed: %s", e)
+            logger.error("AI API request failed (%s/%s): %s", ai_provider, ai_model, e)
             return JSONResponse(status_code=502, content={"detail": "AI service request failed"})
 
     try:
         data = resp.json()
-        content = data["choices"][0]["message"]["content"].strip()
+        if ai_provider == "gemini":
+            content = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        else:
+            content = data["choices"][0]["message"]["content"].strip()
         content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         indices = json.loads(content)
         if not isinstance(indices, list):
             raise ValueError("Expected a JSON array")
     except Exception as e:
-        logger.error("Failed to parse Grok response: %s — raw: %s", e, content[:500] if 'content' in dir() else "N/A")
+        logger.error("Failed to parse AI response (%s): %s — raw: %s", ai_provider, e, content[:500] if 'content' in dir() else "N/A")
         return JSONResponse(status_code=502, content={"detail": "Failed to parse AI response"})
 
     top_posts = []

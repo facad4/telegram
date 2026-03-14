@@ -8,7 +8,7 @@ Rank posts by the following factors, in order of importance:
 
 1. **Impact**: Posts that describe significant events, breaking news, major announcements, policy changes, or developments that affect many people.
 2. **Relevancy**: Posts that are timely and relate to currently trending or widely discussed topics.
-3. **View count**: Posts with higher view counts (`v` field) indicate wider audience reach and engagement — use this as a strong signal of importance.
+3. **Engagement ratio**: The `e` field is the engagement percentage (views / channel subscribers * 100). A higher `e` means the post reached a larger share of its audience. Use this instead of raw view count (`v`) to compare posts fairly across channels of different sizes.
 4. **Cross-references**: Posts whose topic or subject is mentioned or referenced by multiple channels in the feed — this signals broader significance.
 5. **Depth & Detail**: Prefer elaborated posts that contain substantial information, analysis, or context over short or vague messages.
 6. **Media richness**: Posts with media (m=true) or link previews (lp field) are preferred, as they tend to carry more informational value.
@@ -20,7 +20,8 @@ You will receive a JSON array where each element has:
 - `ch`: source channel name
 - `t`: post text (may be truncated)
 - `dt`: publication timestamp
-- `v`: view count
+- `v`: raw view count
+- `e`: engagement % (views / channel subscribers * 100) — use this to compare across channels fairly
 - `m`: whether the post has media (photo/video)
 - `lp`: link preview title (if present)
 

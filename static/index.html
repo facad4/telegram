@@ -495,6 +495,29 @@
     .error-msg, .empty-msg { text-align: center; padding: 40px 20px; color: var(--text-secondary); }
     .error-msg { color: #ef5350; }
 
+    .floating-bubble {
+      position: fixed;
+      top: 60px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(33, 150, 243, 0.92);
+      color: #fff;
+      padding: 10px 24px;
+      border-radius: 24px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      z-index: 9999;
+      pointer-events: none;
+      animation: bubbleFadeInOut 3s ease forwards;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+    }
+    @keyframes bubbleFadeInOut {
+      0%   { opacity: 0; transform: translateX(-50%) translateY(-8px); }
+      10%  { opacity: 1; transform: translateX(-50%) translateY(0); }
+      80%  { opacity: 1; transform: translateX(-50%) translateY(0); }
+      100% { opacity: 0; transform: translateX(-50%) translateY(-8px); }
+    }
+
     /* Mobile Portrait Mode Support */
     @media (max-width: 768px) {
       .header.auto-hide {
@@ -1211,6 +1234,18 @@
           <label>Media Concurrency</label>
           <input type="number" id="mediaConcurrency" min="1" max="20">
         </div>
+        <div class="setting-item">
+          <label>AI Provider</label>
+          <select id="aiProvider" style="padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--card-bg); color:var(--text); font-size:0.9rem;">
+            <option value="gemini">Google Gemini</option>
+            <option value="groq">Groq</option>
+          </select>
+        </div>
+        <div class="setting-item">
+          <label>AI Model</label>
+          <select id="aiModel" style="padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--card-bg); color:var(--text); font-size:0.9rem;">
+          </select>
+        </div>
       </div>
       <button class="add-btn" id="saveSettingsBtn" style="margin-top:10px;">Save Settings</button>
     </div>
@@ -1271,6 +1306,8 @@
     let paused = false;
     let currentView = 'main'; // 'main', 'saved', 'top10', or 'management'
     let mainFeedPostsCache = [];
+    let top10Cache = [];
+    let feedRefreshedSinceTop10 = true;
     let sortNewestFirst = true;
     let isManualRefreshing = false;
     let isScrollingStopped = false;
@@ -1313,6 +1350,7 @@
         if (!resp.ok) throw new Error('Failed');
         allPosts = await resp.json();
         mainFeedPostsCache = [...allPosts];
+        feedRefreshedSinceTop10 = true;
         renderFilters();
         renderPosts();
         const now = new Date();
@@ -1769,10 +1807,21 @@
       }
     }
 
-    async function fetchTop10Posts() {
+    async function fetchTop10Posts(forceRefresh = false) {
       const dot = document.getElementById('statusDot');
       const text = document.getElementById('statusText');
       const container = document.getElementById('postsContainer');
+
+      if (!forceRefresh && top10Cache.length && !feedRefreshedSinceTop10) {
+        allPosts = [...top10Cache];
+        renderFilters();
+        renderPosts();
+        text.textContent = 'Top 10 (cached)';
+        dot.classList.remove('loading');
+        showFloatingBubble('AI filtered top 10 posts');
+        return;
+      }
+
       dot.classList.add('loading');
       text.textContent = 'Analyzing posts with AI...';
       container.innerHTML = '<div class="loading-container"><div class="spinner"></div><span>Analyzing posts with AI...</span></div>';
@@ -1798,17 +1847,29 @@
         }
 
         allPosts = await resp.json();
+        top10Cache = [...allPosts];
+        feedRefreshedSinceTop10 = false;
         renderFilters();
         renderPosts();
         const now = new Date();
         text.textContent = `Top 10 \u2014 ${now.toLocaleTimeString()}`;
         dot.classList.remove('loading');
+        showFloatingBubble('AI filtered top 10 posts');
       } catch (e) {
         dot.classList.remove('loading');
         dot.style.background = '#ef5350';
         text.textContent = 'AI ranking failed';
         container.innerHTML = `<div class="error-msg">Failed to get AI ranking: ${e.message}</div>`;
       }
+    }
+
+    function showFloatingBubble(message) {
+      document.querySelectorAll('.floating-bubble').forEach(el => el.remove());
+      const bubble = document.createElement('div');
+      bubble.className = 'floating-bubble';
+      bubble.textContent = message;
+      document.body.appendChild(bubble);
+      bubble.addEventListener('animationend', () => bubble.remove());
     }
 
     async function toggleSave(btn) {
@@ -1860,6 +1921,10 @@
           document.getElementById('maxPosts').value = config.max_posts || 20;
           document.getElementById('scrollSpeed').value = config.scroll_speed || 50;
           document.getElementById('mediaConcurrency').value = config.media_concurrency || 5;
+          const provider = config.ai_provider || 'gemini';
+          document.getElementById('aiProvider').value = provider;
+          updateAiModelOptions(provider);
+          document.getElementById('aiModel').value = config.ai_model || 'gemini-2.0-flash-lite';
         } catch (e) {
           console.error('Failed to load admin config:', e);
         }
@@ -2123,12 +2188,40 @@
       }
     }
 
+    const AI_MODELS = {
+      gemini: [
+        'gemini-2.0-flash-lite',
+        'gemini-2.0-flash',
+        'gemini-2.5-flash-lite',
+        'gemini-2.5-flash',
+        'gemini-2.5-pro',
+      ],
+      groq: [
+        'llama-3.3-70b-versatile',
+        'llama-3.1-8b-instant',
+        'llama3-70b-8192',
+        'llama3-8b-8192',
+        'gemma2-9b-it',
+        'mixtral-8x7b-32768',
+      ],
+    };
+
+    function updateAiModelOptions(provider) {
+      const select = document.getElementById('aiModel');
+      const current = select.value;
+      const models = AI_MODELS[provider] || [];
+      select.innerHTML = models.map(m => `<option value="${m}">${m}</option>`).join('');
+      if (models.includes(current)) select.value = current;
+    }
+
     async function saveAdminSettings() {
       const config = {
         refresh_interval_minutes: parseInt(document.getElementById('refreshInterval').value),
         max_posts: parseInt(document.getElementById('maxPosts').value),
         scroll_speed: parseInt(document.getElementById('scrollSpeed').value),
-        media_concurrency: parseInt(document.getElementById('mediaConcurrency').value)
+        media_concurrency: parseInt(document.getElementById('mediaConcurrency').value),
+        ai_provider: document.getElementById('aiProvider').value,
+        ai_model: document.getElementById('aiModel').value
       };
       try {
         const resp = await authFetch('/api/admin/config', {
@@ -2164,7 +2257,7 @@
           await fetchSavedPosts();
         } else if (currentView === 'top10') {
           mainFeedPostsCache = [];
-          await fetchTop10Posts();
+          await fetchTop10Posts(true);
         }
       } finally {
         isManualRefreshing = false;
@@ -2235,6 +2328,9 @@
       document.getElementById('addFeedBtn').addEventListener('click', addFeed);
       document.getElementById('loadPrivateChannelsBtn').addEventListener('click', loadPrivateChannels);
       document.getElementById('saveSettingsBtn').addEventListener('click', saveAdminSettings);
+      document.getElementById('aiProvider').addEventListener('change', (e) => {
+        updateAiModelOptions(e.target.value);
+      });
 
       document.getElementById('newFeedUrl').addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && acActiveIndex < 0) { e.preventDefault(); addFeed(); }

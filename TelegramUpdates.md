@@ -67,6 +67,7 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - **Post URL format**: `https://t.me/c/{channel_id}/{msg_id}` (only accessible to channel members)
 - **Channel avatar**: Downloaded via `client.download_profile_photo(entity)` and base64-encoded
 - **Concurrency**: Private channel fetches run concurrently via `asyncio.gather()`
+- **Channel subscribers**: `entity.participants_count` included as `channel_subscribers` in each post dict for engagement normalization
 - **Post format**: Converted to the same dict structure as scraped public posts for seamless merging
 
 #### Post Fetching Pipeline (`GET /api/posts`)
@@ -166,6 +167,7 @@ Returns the latest posts from the logged-in user's configured channels (both pub
     "datetime": "2026-03-05T20:08:05+00:00",
     "photo_url": "https://cdn.../image.jpg",
     "video_thumb": "https://cdn.../thumb.jpg",
+    "channel_subscribers": 12500,
     "link_preview": {
       "url": "https://example.com",
       "title": "Link Title",
@@ -189,7 +191,8 @@ Sends the user's current feed posts to xAI Grok LLM for importance ranking, retu
 **Implementation**:
 - Reads the system prompt from `top10_prompt.md`
 - Strips heavy fields (HTML, base64 images) and truncates text to reduce tokens
-- Calls `https://api.x.ai/v1/chat/completions` with `grok-3-latest` model
+- Computes per-post engagement ratio (views / channel subscribers * 100) for fair cross-channel comparison
+- Calls `https://api.groq.com/openai/v1/chat/completions` with `llama-3.3-70b-versatile` model
 - Parses the returned JSON array of indices and maps them back to full post objects
 
 **Success response** (200): JSON array of up to 10 post objects (same format as `/api/posts`)
@@ -198,7 +201,7 @@ Sends the user's current feed posts to xAI Grok LLM for importance ranking, retu
 - 400: `{ "detail": "Need at least 10 posts to rank" }` (insufficient posts)
 - 502: `{ "detail": "AI service request failed" }` (Grok API error)
 - 502: `{ "detail": "Failed to parse AI response" }` (invalid response format)
-- 503: `{ "detail": "AI ranking not configured (XAI_API_KEY missing)" }` (missing API key)
+- 503: `{ "detail": "AI ranking not configured (GROQ_API_KEY missing)" }` (missing API key)
 
 #### `GET /api/feeds` (protected)
 Returns the logged-in user's feeds from Supabase as objects with metadata.
@@ -461,12 +464,13 @@ Each post tile has a Share button in the footer (between views count and save bu
 
 #### AI Top 10 Important Posts
 - **Trigger**: "!" icon button in the header control bar
-- **Flow**: Sends all current feed posts to xAI Grok LLM for analysis, receives the top 10 most important posts ranked by impact, relevancy, cross-references, depth, and media richness
+- **Flow**: Sends all current feed posts to Groq-hosted LLM (`llama-3.3-70b-versatile`) for analysis, receives the top 10 most important posts ranked by impact, relevancy, engagement ratio, cross-references, depth, and media richness
 - **View**: Dedicated `top10` view in the multi-view interface; shows AI-ranked posts in the standard feed layout
 - **Loading State**: Spinner with "Analyzing posts with AI..." message during the API call
 - **Status Bar**: Shows "Top 10 — {time}" after completion
 - **Manual Sync**: Refresh button clears cached posts and re-runs the full analysis
 - **Prompt**: System prompt stored in editable `top10_prompt.md` file; can be customized without code changes
+- **Engagement Normalization**: Backend computes engagement ratio (views / channel subscribers * 100) per post so the LLM can compare fairly across channels of different sizes
 - **Token Efficiency**: Backend strips heavy fields (HTML, base64 images) and truncates text before sending to the LLM
 - **Error Handling**: Graceful error display if AI service is unavailable or misconfigured
 
@@ -664,6 +668,12 @@ telethon           # Telegram API client for channel search and private channel 
 - **No caching**: Fresh data on every request (trade-off: freshness vs speed)
 - **Timeout**: 15-second timeout per HTTP request
 - **Private channels**: Base64-encoded media increases response size but avoids separate media endpoints
+- **Top 10 AI ranking**: 
+  - Posts capped at 50 before sending to LLM to stay within token limits
+  - Post data stripped to compact keys (`i`, `ch`, `t`, `dt`, `v`, `e`, `m`, `lp`) — no HTML, base64 images, or full URLs
+  - Text truncated to 200 chars per post
+  - Engagement ratio computed server-side to avoid burdening the LLM with subscriber math
+  - Frontend caches main feed posts (`mainFeedPostsCache`) to avoid re-fetching when switching to Top 10 view
 - **Frontend optimization**: 
   - `requestAnimationFrame` for smooth scrolling
   - Lazy image loading with `loading="lazy"`
@@ -691,7 +701,7 @@ telethon           # Telegram API client for channel search and private channel 
 - **User-Agent spoofing**: Uses Chrome UA to avoid bot detection
 - **Supabase credentials**: Stored in `.env` file (excluded from git via `.gitignore`); loaded at runtime via `python-dotenv`
 - **Telegram API credentials**: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `TELEGRAM_SESSION` in `.env`; optional -- channel search and private channel access are disabled if not configured
-- **xAI API credentials**: `XAI_API_KEY` (or `GROK_API_KEY` as fallback) in `.env`; optional -- Top 10 feature returns 503 if not configured
+- **Groq API credentials**: `GROK_API_KEY` in `.env`; optional -- Top 10 AI ranking feature returns 503 if not configured
 - **Telegram session management**: Separate sessions recommended for dev and prod to avoid revocation; `generate_session.py` script supports creating labeled sessions ("TGUpdates-Dev" / "TGUpdates-Prod")
 - **Startup logging**: No user or feed data is logged at startup
 - **Service worker**: Does not intercept fetch requests (avoids stripping `Authorization` headers on mobile browsers); versioned with cache-clearing on activation
@@ -751,7 +761,7 @@ telethon           # Telegram API client for channel search and private channel 
 - `get_admin_channels(request, user)`: `GET /api/admin/channels` -- lists all channels the Telethon session is a member of (admin-only)
 - `get_full_config(user)`: `GET /api/admin/config` -- returns config.json (admin-only, 403 for non-admin)
 - `update_config(request, user)`: `POST /api/admin/config` -- updates config.json (admin-only, 403 for non-admin)
-- `get_top_posts(request, user)`: `POST /api/top-posts` -- receives posts array, sends stripped-down versions to Grok LLM with system prompt from `top10_prompt.md`, parses response indices, returns top 10 full post objects
+- `get_top_posts(request, user)`: `POST /api/top-posts` -- receives posts array, computes per-post engagement ratio (views/subscribers), sends stripped-down versions to Groq LLM (`llama-3.3-70b-versatile`) with system prompt from `top10_prompt.md`, parses response indices, returns top 10 full post objects
 - `normalize_channel(raw: str) -> str`: Extracts channel name from various URL formats
 - `fetch_channel_html(client, channel) -> str | None`: Async HTTP request with error handling
 - `extract_image_url(style: str) -> str | None`: Regex extraction from CSS `url()` values
@@ -821,7 +831,7 @@ telethon           # Telegram API client for channel search and private channel 
 ├── config.json            # Global settings (refresh interval, max posts, scroll speed)
 ├── top10_prompt.md        # Editable system prompt for Grok LLM Top 10 ranking
 ├── generate_session.py    # Telethon StringSession generator (dev/prod labeled sessions)
-├── .env                   # Environment variables (SUPABASE_URL, SUPABASE_KEY, TELEGRAM_*, XAI_API_KEY)
+├── .env                   # Environment variables (SUPABASE_URL, SUPABASE_KEY, TELEGRAM_*, GROK_API_KEY)
 ├── requirements.txt       # Python dependencies
 ├── static/
 │   ├── index.html         # Complete frontend application with PWA and share system
