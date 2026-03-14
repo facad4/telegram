@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import logging
@@ -20,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from telethon import TelegramClient, functions
 from telethon.sessions import StringSession
-from telethon.tl.types import Channel, Chat, MessageMediaPhoto, MessageMediaDocument
+from telethon.tl.types import Channel, Chat, MessageMediaPhoto, MessageMediaDocument, PeerChannel
 
 from database import Database
 
@@ -28,6 +29,7 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logging.getLogger("telethon").setLevel(logging.WARNING)
 
 JWT_SECRET = secrets.token_hex(32)
 JWT_ALGORITHM = "HS256"
@@ -83,7 +85,10 @@ app = FastAPI(lifespan=lifespan)
 CONFIG_PATH = Path(__file__).parent / "config.json"
 AVATAR_CACHE_DIR = Path(__file__).parent / "avatar_cache"
 AVATAR_CACHE_DIR.mkdir(exist_ok=True)
+THUMB_CACHE_DIR = Path(__file__).parent / "thumb_cache"
+THUMB_CACHE_DIR.mkdir(exist_ok=True)
 AVATAR_TTL_SECONDS = 1_209_600  # 2 weeks
+THUMB_TTL_SECONDS = 1_209_600   # 2 weeks
 
 
 def load_config() -> dict:
@@ -197,15 +202,25 @@ def parse_channel_posts(html: str, channel: str) -> list[dict]:
     return posts
 
 
-async def _download_thumb(tg: TelegramClient, media, sem: asyncio.Semaphore) -> str | None:
-    """Download a photo thumbnail under a concurrency semaphore."""
+async def _download_thumb(
+    tg: TelegramClient, media, sem: asyncio.Semaphore, cache_key: str,
+) -> str | None:
+    """Download a photo thumbnail, caching to disk. Returns a URL path."""
+    cache_path = THUMB_CACHE_DIR / f"{cache_key}.jpg"
+
+    if cache_path.exists() and (time.time() - cache_path.stat().st_mtime) < THUMB_TTL_SECONDS:
+        return f"/api/thumb/{cache_key}"
+
     async with sem:
         try:
             buf = io.BytesIO()
             await tg.download_media(media, file=buf, thumb=-1)
             buf.seek(0)
-            b64 = base64.b64encode(buf.read()).decode("ascii")
-            return f"data:image/jpeg;base64,{b64}"
+            data = buf.read()
+            if data:
+                cache_path.write_bytes(data)
+                return f"/api/thumb/{cache_key}"
+            return None
         except Exception:
             return None
 
@@ -246,18 +261,18 @@ async def fetch_channel_posts_telethon(
 
         filtered = [m for m in messages if m.text is not None or m.media is not None]
 
-        download_tasks = [
-            _download_thumb(tg, msg.media, media_sem)
-            if isinstance(msg.media, MessageMediaPhoto) else asyncio.sleep(0, result=None)
-            for msg in filtered
-        ]
-        photo_results = await asyncio.gather(*download_tasks)
-
         if username:
             channel_name = username
         else:
             real_id = getattr(entity, "id", channel_ref)
             channel_name = str(real_id)
+
+        download_tasks = [
+            _download_thumb(tg, msg.media, media_sem, f"{channel_name}_{msg.id}")
+            if isinstance(msg.media, MessageMediaPhoto) else asyncio.sleep(0, result=None)
+            for msg in filtered
+        ]
+        photo_results = await asyncio.gather(*download_tasks)
 
         posts = []
         for msg, photo_url in zip(filtered, photo_results):
@@ -299,6 +314,15 @@ async def get_avatar(channel_key: str):
         raise HTTPException(status_code=404, detail="Avatar not found")
     return FileResponse(path, media_type="image/jpeg",
                         headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/api/thumb/{thumb_key}")
+async def get_thumb(thumb_key: str):
+    path = THUMB_CACHE_DIR / f"{thumb_key}.jpg"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+    return FileResponse(path, media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=604800"})
 
 
 @app.post("/api/login")
@@ -346,7 +370,7 @@ async def get_posts(request: Request, user: dict = Depends(require_auth)):
             username = normalize_channel(f["feed_url"])
             telethon_tasks.append(fetch_channel_posts_telethon(tg, username, limit=max_posts, media_sem=media_sem))
         for f in private_feeds:
-            telethon_tasks.append(fetch_channel_posts_telethon(tg, int(f["feed_url"]), limit=max_posts, media_sem=media_sem))
+            telethon_tasks.append(fetch_channel_posts_telethon(tg, PeerChannel(int(f["feed_url"])), limit=max_posts, media_sem=media_sem))
         if telethon_tasks:
             results = await asyncio.gather(*telethon_tasks)
             for posts in results:
