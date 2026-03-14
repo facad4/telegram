@@ -16,6 +16,8 @@ Rank posts by the following factors, in order of importance:
 ## Exclusions
 
 - **Missile/rocket alert posts**: Skip posts that are solely real-time missile alerts, siren notifications, or rocket warning messages (e.g., "צבע אדום", "התרעה", "אזעקה"). These are time-sensitive alerts with no analytical value in a top-10 ranking.
+- **Promotional content**: Skip posts that are primarily offering courses, selling products/services, or marketing promotions. This includes paid course advertisements, discount offers, affiliate marketing, and sales pitches disguised as content.
+- **Donation and fundraising appeals**: Skip posts whose primary purpose is soliciting donations, crowdfunding, or fundraising — even for charitable or worthy causes. These are calls to action, not news.
 
 ## Input Format
 
