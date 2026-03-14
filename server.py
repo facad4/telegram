@@ -83,6 +83,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
+TOP10_PROMPT_PATH = Path(__file__).parent / "top10_prompt.md"
+XAI_API_KEY = os.environ.get("XAI_API_KEY") or os.environ.get("GROK_API_KEY", "")
 AVATAR_CACHE_DIR = Path(__file__).parent / "avatar_cache"
 AVATAR_CACHE_DIR.mkdir(exist_ok=True)
 THUMB_CACHE_DIR = Path(__file__).parent / "thumb_cache"
@@ -387,6 +389,78 @@ async def get_posts(request: Request, user: dict = Depends(require_auth)):
 
     all_posts.sort(key=lambda p: p["datetime"], reverse=True)
     return all_posts[:max_posts]
+
+
+@app.post("/api/top-posts")
+async def get_top_posts(request: Request, user: dict = Depends(require_auth)):
+    if not XAI_API_KEY:
+        return JSONResponse(status_code=503, content={"detail": "AI ranking not configured (XAI_API_KEY missing)"})
+
+    body = await request.json()
+    posts = body.get("posts", [])
+    if len(posts) < 10:
+        return JSONResponse(status_code=400, content={"detail": "Need at least 10 posts to rank"})
+
+    try:
+        prompt_text = TOP10_PROMPT_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return JSONResponse(status_code=500, content={"detail": "top10_prompt.md not found"})
+
+    posts = posts[:50]
+
+    slim_posts = []
+    for i, p in enumerate(posts):
+        entry = {
+            "i": i,
+            "ch": p.get("channel", ""),
+            "t": (p.get("text_plain") or "")[:200],
+            "dt": p.get("datetime", ""),
+            "v": p.get("views", ""),
+            "m": bool(p.get("photo_url") or p.get("video_thumb")),
+        }
+        lp = p.get("link_preview")
+        if lp and lp.get("title"):
+            entry["lp"] = lp["title"][:80]
+        slim_posts.append(entry)
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        try:
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {XAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "temperature": 0.2,
+                    "messages": [
+                        {"role": "system", "content": prompt_text},
+                        {"role": "user", "content": json.dumps(slim_posts, ensure_ascii=False)},
+                    ],
+                },
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            logger.error("Grok API request failed: %s", e)
+            return JSONResponse(status_code=502, content={"detail": "AI service request failed"})
+
+    try:
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"].strip()
+        content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        indices = json.loads(content)
+        if not isinstance(indices, list):
+            raise ValueError("Expected a JSON array")
+    except Exception as e:
+        logger.error("Failed to parse Grok response: %s — raw: %s", e, content[:500] if 'content' in dir() else "N/A")
+        return JSONResponse(status_code=502, content={"detail": "Failed to parse AI response"})
+
+    top_posts = []
+    for idx in indices:
+        if isinstance(idx, int) and 0 <= idx < len(posts):
+            top_posts.append(posts[idx])
+    return top_posts[:10]
 
 
 @app.get("/api/config", dependencies=[Depends(require_auth)])

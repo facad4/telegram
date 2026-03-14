@@ -178,6 +178,28 @@ Returns the latest posts from the logged-in user's configured channels (both pub
 
 For private channel posts, `photo_url` and `channel_photo` may be base64 `data:image/jpeg;base64,...` URIs, and `post_url` uses the format `https://t.me/c/{channel_id}/{msg_id}`.
 
+#### `POST /api/top-posts` (protected)
+Sends the user's current feed posts to xAI Grok LLM for importance ranking, returns the top 10.
+
+**Request body**:
+```json
+{ "posts": [ /* array of post objects from /api/posts */ ] }
+```
+
+**Implementation**:
+- Reads the system prompt from `top10_prompt.md`
+- Strips heavy fields (HTML, base64 images) and truncates text to reduce tokens
+- Calls `https://api.x.ai/v1/chat/completions` with `grok-3-latest` model
+- Parses the returned JSON array of indices and maps them back to full post objects
+
+**Success response** (200): JSON array of up to 10 post objects (same format as `/api/posts`)
+
+**Error responses**:
+- 400: `{ "detail": "Need at least 10 posts to rank" }` (insufficient posts)
+- 502: `{ "detail": "AI service request failed" }` (Grok API error)
+- 502: `{ "detail": "Failed to parse AI response" }` (invalid response format)
+- 503: `{ "detail": "AI ranking not configured (XAI_API_KEY missing)" }` (missing API key)
+
 #### `GET /api/feeds` (protected)
 Returns the logged-in user's feeds from Supabase as objects with metadata.
 
@@ -321,9 +343,10 @@ Serves the main application (`static/index.html`) with `Cache-Control: no-cache,
 - **Border radius**: 14px consistent rounded corners
 
 #### Navigation System
-- **Multi-View Interface**: Three distinct views accessible via header navigation
+- **Multi-View Interface**: Four distinct views accessible via header navigation
   - **Main Feed**: Primary channel content (default view, "Main" link on left)
   - **Saved Posts**: Bookmarked posts (bookmark icon in control buttons)
+  - **Top 10**: AI-ranked most important posts (❗ icon in control buttons)
   - **Management Interface**: Feed and admin controls (⚙️ icon on top-right)
 - **Navigation Layout**: Streamlined header without logo
   - **Left side**: Main navigation link + control buttons
@@ -435,6 +458,17 @@ Each post tile has a Share button in the footer (between views count and save bu
 - **State management**: `activeFilter` variable persists selection
 - **Implementation**: Filter posts array and re-render on change
 - **Context Awareness**: Hidden in Management view, visible in feed views
+
+#### AI Top 10 Important Posts
+- **Trigger**: "!" icon button in the header control bar
+- **Flow**: Sends all current feed posts to xAI Grok LLM for analysis, receives the top 10 most important posts ranked by impact, relevancy, cross-references, depth, and media richness
+- **View**: Dedicated `top10` view in the multi-view interface; shows AI-ranked posts in the standard feed layout
+- **Loading State**: Spinner with "Analyzing posts with AI..." message during the API call
+- **Status Bar**: Shows "Top 10 — {time}" after completion
+- **Manual Sync**: Refresh button clears cached posts and re-runs the full analysis
+- **Prompt**: System prompt stored in editable `top10_prompt.md` file; can be customized without code changes
+- **Token Efficiency**: Backend strips heavy fields (HTML, base64 images) and truncates text before sending to the LLM
+- **Error Handling**: Graceful error display if AI service is unavailable or misconfigured
 
 #### Content Processing
 - **HTML sanitization**: `sanitizeHtml()` function removes `onclick`, adds security attributes
@@ -657,6 +691,7 @@ telethon           # Telegram API client for channel search and private channel 
 - **User-Agent spoofing**: Uses Chrome UA to avoid bot detection
 - **Supabase credentials**: Stored in `.env` file (excluded from git via `.gitignore`); loaded at runtime via `python-dotenv`
 - **Telegram API credentials**: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `TELEGRAM_SESSION` in `.env`; optional -- channel search and private channel access are disabled if not configured
+- **xAI API credentials**: `XAI_API_KEY` (or `GROK_API_KEY` as fallback) in `.env`; optional -- Top 10 feature returns 503 if not configured
 - **Telegram session management**: Separate sessions recommended for dev and prod to avoid revocation; `generate_session.py` script supports creating labeled sessions ("TGUpdates-Dev" / "TGUpdates-Prod")
 - **Startup logging**: No user or feed data is logged at startup
 - **Service worker**: Does not intercept fetch requests (avoids stripping `Authorization` headers on mobile browsers); versioned with cache-clearing on activation
@@ -716,6 +751,7 @@ telethon           # Telegram API client for channel search and private channel 
 - `get_admin_channels(request, user)`: `GET /api/admin/channels` -- lists all channels the Telethon session is a member of (admin-only)
 - `get_full_config(user)`: `GET /api/admin/config` -- returns config.json (admin-only, 403 for non-admin)
 - `update_config(request, user)`: `POST /api/admin/config` -- updates config.json (admin-only, 403 for non-admin)
+- `get_top_posts(request, user)`: `POST /api/top-posts` -- receives posts array, sends stripped-down versions to Grok LLM with system prompt from `top10_prompt.md`, parses response indices, returns top 10 full post objects
 - `normalize_channel(raw: str) -> str`: Extracts channel name from various URL formats
 - `fetch_channel_html(client, channel) -> str | None`: Async HTTP request with error handling
 - `extract_image_url(style: str) -> str | None`: Regex extraction from CSS `url()` values
@@ -766,6 +802,7 @@ telethon           # Telegram API client for channel search and private channel 
 - `searchChannels(query)`: Calls `GET /api/search-channels?q=` and populates the autocomplete dropdown
 - `showAutocomplete(items)` / `hideAutocomplete()`: Renders or hides the autocomplete dropdown
 - `selectAutocompleteItem(index)`: Populates the feed input with the selected channel's URL
+- `fetchTop10Posts()`: Sends current feed posts to `POST /api/top-posts` for AI ranking; displays loading state, renders top 10 results, handles errors
 - `removeFeed(feedUrl)`: Removes a feed via `DELETE /api/feeds`
 - `saveAdminSettings()`: Saves global settings via `POST /api/admin/config` (admin only)
 - `manualSync()`: Manual post refresh with loading states
@@ -782,8 +819,9 @@ telethon           # Telegram API client for channel search and private channel 
 ├── server.py              # FastAPI backend with PWA support, Supabase lifespan, and Telethon integration
 ├── database.py            # Database class encapsulating Supabase async client
 ├── config.json            # Global settings (refresh interval, max posts, scroll speed)
+├── top10_prompt.md        # Editable system prompt for Grok LLM Top 10 ranking
 ├── generate_session.py    # Telethon StringSession generator (dev/prod labeled sessions)
-├── .env                   # Environment variables (SUPABASE_URL, SUPABASE_KEY, TELEGRAM_*)
+├── .env                   # Environment variables (SUPABASE_URL, SUPABASE_KEY, TELEGRAM_*, XAI_API_KEY)
 ├── requirements.txt       # Python dependencies
 ├── static/
 │   ├── index.html         # Complete frontend application with PWA and share system
