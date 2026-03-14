@@ -13,3 +13,5 @@ PWA_README.md
 start.sh
 .env
 groq_test.py
+avatar_cache/
+

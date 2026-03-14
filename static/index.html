@@ -1204,6 +1204,10 @@
           <label>Scroll Speed</label>
           <input type="number" id="scrollSpeed" min="10" max="200">
         </div>
+        <div class="setting-item">
+          <label>Media Concurrency</label>
+          <input type="number" id="mediaConcurrency" min="1" max="20">
+        </div>
       </div>
       <button class="add-btn" id="saveSettingsBtn" style="margin-top:10px;">Save Settings</button>
     </div>
@@ -1797,6 +1801,7 @@
           document.getElementById('refreshInterval').value = config.refresh_interval_minutes || 5;
           document.getElementById('maxPosts').value = config.max_posts || 20;
           document.getElementById('scrollSpeed').value = config.scroll_speed || 50;
+          document.getElementById('mediaConcurrency').value = config.media_concurrency || 5;
         } catch (e) {
           console.error('Failed to load admin config:', e);
         }
@@ -2064,7 +2069,8 @@
       const config = {
         refresh_interval_minutes: parseInt(document.getElementById('refreshInterval').value),
         max_posts: parseInt(document.getElementById('maxPosts').value),
-        scroll_speed: parseInt(document.getElementById('scrollSpeed').value)
+        scroll_speed: parseInt(document.getElementById('scrollSpeed').value),
+        media_concurrency: parseInt(document.getElementById('mediaConcurrency').value)
       };
       try {
         const resp = await authFetch('/api/admin/config', {
