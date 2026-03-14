@@ -87,6 +87,7 @@ CONFIG_PATH = Path(__file__).parent / "config.json"
 TOP10_PROMPT_PATH = Path(__file__).parent / "top10_prompt.md"
 GROQ_API_KEY = os.environ.get("GROK_API_KEY", "")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "")
 AVATAR_CACHE_DIR = Path(__file__).parent / "avatar_cache"
 AVATAR_CACHE_DIR.mkdir(exist_ok=True)
 THUMB_CACHE_DIR = Path(__file__).parent / "thumb_cache"
@@ -490,13 +491,15 @@ async def get_posts(request: Request, user: dict = Depends(require_auth)):
 @app.post("/api/top-posts")
 async def get_top_posts(request: Request, user: dict = Depends(require_auth)):
     config = load_config()
-    ai_provider = config.get("ai_provider", "gemini")
-    ai_model = config.get("ai_model", "gemini-2.0-flash-lite")
+    ai_provider = config.get("ai_provider", "mistral")
+    ai_model = config.get("ai_model", "mistral-small-2506")
 
     if ai_provider == "gemini" and not GOOGLE_API_KEY:
         return JSONResponse(status_code=503, content={"detail": "AI ranking not configured (GOOGLE_API_KEY missing)"})
     if ai_provider == "groq" and not GROQ_API_KEY:
         return JSONResponse(status_code=503, content={"detail": "AI ranking not configured (GROQ_API_KEY missing)"})
+    if ai_provider == "mistral" and not MISTRAL_API_KEY:
+        return JSONResponse(status_code=503, content={"detail": "AI ranking not configured (MISTRAL_API_KEY missing)"})
 
     body = await request.json()
     posts = body.get("posts", [])
@@ -508,7 +511,7 @@ async def get_top_posts(request: Request, user: dict = Depends(require_auth)):
     except FileNotFoundError:
         return JSONResponse(status_code=500, content={"detail": "top10_prompt.md not found"})
 
-    posts = posts[:50]
+    posts = posts[:100]
 
     slim_posts = []
     for i, p in enumerate(posts):
@@ -549,6 +552,23 @@ async def get_top_posts(request: Request, user: dict = Depends(require_auth)):
                         },
                     },
                 )
+            elif ai_provider == "mistral":
+                resp = await client.post(
+                    "https://api.mistral.ai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {MISTRAL_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": ai_model,
+                        "temperature": 0.2,
+                        "response_format": {"type": "json_object"},
+                        "messages": [
+                            {"role": "system", "content": prompt_text},
+                            {"role": "user", "content": user_content},
+                        ],
+                    },
+                )
             else:
                 resp = await client.post(
                     "https://api.groq.com/openai/v1/chat/completions",
@@ -574,6 +594,8 @@ async def get_top_posts(request: Request, user: dict = Depends(require_auth)):
                     detail = err_json.get("error", {}).get("message", detail)
                 except Exception:
                     pass
+                if resp.status_code == 429 or "quota" in detail.lower() or "rate limit" in detail.lower() or "resource has been exhausted" in detail.lower():
+                    detail = "Quota exceeded — please try again later"
                 return JSONResponse(status_code=502, content={"detail": detail})
         except Exception as e:
             logger.error("AI API request failed (%s/%s): %s", ai_provider, ai_model, e)
@@ -583,7 +605,7 @@ async def get_top_posts(request: Request, user: dict = Depends(require_auth)):
         data = resp.json()
         if ai_provider == "gemini":
             content = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        else:
+        else:  # groq and mistral use OpenAI-compatible format
             content = data["choices"][0]["message"]["content"].strip()
         content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         indices = json.loads(content)

@@ -13,6 +13,10 @@ Rank posts by the following factors, in order of importance:
 5. **Depth & Detail**: Prefer elaborated posts that contain substantial information, analysis, or context over short or vague messages.
 6. **Media richness**: Posts with media (m=true) or link previews (lp field) are preferred, as they tend to carry more informational value.
 
+## Exclusions
+
+- **Missile/rocket alert posts**: Skip posts that are solely real-time missile alerts, siren notifications, or rocket warning messages (e.g., "צבע אדום", "התרעה", "אזעקה"). These are time-sensitive alerts with no analytical value in a top-10 ranking.
+
 ## Input Format
 
 You will receive a JSON array where each element has:

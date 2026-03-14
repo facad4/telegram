@@ -8,7 +8,7 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - **Database**: Supabase (PostgreSQL) via async Python SDK, encapsulated in `database.py`
 - **Frontend**: Single-page vanilla HTML/CSS/JavaScript application (`static/index.html`) with auto-scrolling tiles
 - **Configuration**: `config.json` for global settings; per-user channel feeds stored in Supabase `Feeds` table
-- **Environment**: `.env` file for secrets (`SUPABASE_URL`, `SUPABASE_KEY`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION`) loaded via `python-dotenv`
+- **Environment**: `.env` file for secrets (`SUPABASE_URL`, `SUPABASE_KEY`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION`, `GROK_API_KEY`, `GOOGLE_API_KEY`) loaded via `python-dotenv`
 - **Dependencies**: FastAPI, httpx, BeautifulSoup4, supabase, python-dotenv, telethon (see `requirements.txt`)
 
 ## Core Features
@@ -33,8 +33,11 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
   ```json
   {
     "refresh_interval_minutes": 5,
-    "max_posts": 30,
-    "scroll_speed": 50
+    "max_posts": 100,
+    "scroll_speed": 50,
+    "media_concurrency": 20,
+    "ai_provider": "gemini",
+    "ai_model": "gemini-2.5-flash"
   }
   ```
 - Editable only by admin user (`id = 1`) via the management interface
@@ -58,6 +61,7 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - **No caching**: Fresh data on every request
 - **Concurrency**: `asyncio.gather()` for simultaneous channel fetching
 - **Error handling**: Failed channels are silently skipped, errors logged
+- **Grouped media merging**: `_merge_grouped_posts()` detects consecutive post IDs where some lack text (media album groups) and merges them into a single post, keeping the first media and the text from whichever item has it
 
 #### Private Channel Fetching via Telethon API
 - **Method**: `fetch_private_channel_posts(tg_client, channel_id, limit)` uses Telethon's `get_messages()` to fetch recent messages from private channels the session user is a member of
@@ -69,6 +73,7 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - **Concurrency**: Private channel fetches run concurrently via `asyncio.gather()`
 - **Channel subscribers**: `entity.participants_count` included as `channel_subscribers` in each post dict for engagement normalization
 - **Post format**: Converted to the same dict structure as scraped public posts for seamless merging
+- **Grouped media merging**: `_merge_telethon_grouped()` uses Telethon's `grouped_id` attribute to detect album messages and merges them into a single post per group
 
 #### Post Fetching Pipeline (`GET /api/posts`)
 1. Load user's feeds from Supabase (includes `is_private` flag)
@@ -181,7 +186,7 @@ Returns the latest posts from the logged-in user's configured channels (both pub
 For private channel posts, `photo_url` and `channel_photo` may be base64 `data:image/jpeg;base64,...` URIs, and `post_url` uses the format `https://t.me/c/{channel_id}/{msg_id}`.
 
 #### `POST /api/top-posts` (protected)
-Sends the user's current feed posts to xAI Grok LLM for importance ranking, returns the top 10.
+Sends the user's current feed posts to a configurable AI provider (Google Gemini or Groq) for importance ranking, returns the top 10.
 
 **Request body**:
 ```json
@@ -192,16 +197,19 @@ Sends the user's current feed posts to xAI Grok LLM for importance ranking, retu
 - Reads the system prompt from `top10_prompt.md`
 - Strips heavy fields (HTML, base64 images) and truncates text to reduce tokens
 - Computes per-post engagement ratio (views / channel subscribers * 100) for fair cross-channel comparison
-- Calls `https://api.groq.com/openai/v1/chat/completions` with `llama-3.3-70b-versatile` model
+- Reads `ai_provider` and `ai_model` from `config.json`
+- Gemini path: calls `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` with `responseMimeType: "application/json"`
+- Groq path: calls `https://api.groq.com/openai/v1/chat/completions`
 - Parses the returned JSON array of indices and maps them back to full post objects
+- On error: logs response body and forwards the API's error message to the frontend
 
 **Success response** (200): JSON array of up to 10 post objects (same format as `/api/posts`)
 
 **Error responses**:
 - 400: `{ "detail": "Need at least 10 posts to rank" }` (insufficient posts)
-- 502: `{ "detail": "AI service request failed" }` (Grok API error)
+- 502: `{ "detail": "AI service request failed" }` (API error)
 - 502: `{ "detail": "Failed to parse AI response" }` (invalid response format)
-- 503: `{ "detail": "AI ranking not configured (GROQ_API_KEY missing)" }` (missing API key)
+- 503: `{ "detail": "AI ranking not configured (GOOGLE_API_KEY missing)" }` or `{ "detail": "AI ranking not configured (GROQ_API_KEY missing)" }` depending on provider
 
 #### `GET /api/feeds` (protected)
 Returns the logged-in user's feeds from Supabase as objects with metadata.
@@ -307,8 +315,11 @@ Updates global settings via admin interface. Returns 403 for non-admin users (`u
 ```json
 {
   "refresh_interval_minutes": 5,
-  "max_posts": 30,
-  "scroll_speed": 50
+  "max_posts": 100,
+  "scroll_speed": 50,
+  "media_concurrency": 20,
+  "ai_provider": "gemini",
+  "ai_model": "gemini-2.5-flash"
 }
 ```
 
@@ -464,12 +475,16 @@ Each post tile has a Share button in the footer (between views count and save bu
 
 #### AI Top 10 Important Posts
 - **Trigger**: "!" icon button in the header control bar
-- **Flow**: Sends all current feed posts to Groq-hosted LLM (`llama-3.3-70b-versatile`) for analysis, receives the top 10 most important posts ranked by impact, relevancy, engagement ratio, cross-references, depth, and media richness
+- **Flow**: Sends all current feed posts to a configurable AI provider (default: Google Gemini `gemini-2.5-flash`) for analysis, receives the top 10 most important posts ranked by impact, relevancy, engagement ratio, cross-references, depth, and media richness
 - **View**: Dedicated `top10` view in the multi-view interface; shows AI-ranked posts in the standard feed layout
 - **Loading State**: Spinner with "Analyzing posts with AI..." message during the API call
 - **Status Bar**: Shows "Top 10 — {time}" after completion
+- **Floating Bubble**: On successful load, a floating bubble notification displays "AI filtered top 10 posts" for 3 seconds (CSS animation, auto-removed from DOM)
 - **Manual Sync**: Refresh button clears cached posts and re-runs the full analysis
+- **Frontend Caching**: Top 10 results are cached in `top10Cache`; pressing "!" again serves from cache unless the main feed was refreshed since the last analysis (`feedRefreshedSinceTop10` flag). Manual sync always forces a fresh API call.
 - **Prompt**: System prompt stored in editable `top10_prompt.md` file; can be customized without code changes
+- **Exclusions**: The prompt instructs the LLM to skip missile/rocket alert posts (real-time siren notifications) as they have no analytical value in a ranking
+- **Multi-Provider Support**: Backend supports Google Gemini and Groq APIs; provider and model configurable via admin settings (`ai_provider`, `ai_model` in `config.json`)
 - **Engagement Normalization**: Backend computes engagement ratio (views / channel subscribers * 100) per post so the LLM can compare fairly across channels of different sizes
 - **Token Efficiency**: Backend strips heavy fields (HTML, base64 images) and truncates text before sending to the LLM
 - **Error Handling**: Graceful error display if AI service is unavailable or misconfigured
@@ -674,6 +689,7 @@ telethon           # Telegram API client for channel search and private channel 
   - Text truncated to 200 chars per post
   - Engagement ratio computed server-side to avoid burdening the LLM with subscriber math
   - Frontend caches main feed posts (`mainFeedPostsCache`) to avoid re-fetching when switching to Top 10 view
+  - Frontend caches Top 10 results (`top10Cache`); re-uses cache unless the main feed was refreshed (`feedRefreshedSinceTop10` flag), avoiding redundant API calls
 - **Frontend optimization**: 
   - `requestAnimationFrame` for smooth scrolling
   - Lazy image loading with `loading="lazy"`
@@ -701,7 +717,7 @@ telethon           # Telegram API client for channel search and private channel 
 - **User-Agent spoofing**: Uses Chrome UA to avoid bot detection
 - **Supabase credentials**: Stored in `.env` file (excluded from git via `.gitignore`); loaded at runtime via `python-dotenv`
 - **Telegram API credentials**: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `TELEGRAM_SESSION` in `.env`; optional -- channel search and private channel access are disabled if not configured
-- **Groq API credentials**: `GROK_API_KEY` in `.env`; optional -- Top 10 AI ranking feature returns 503 if not configured
+- **AI API credentials**: `GROK_API_KEY` (Groq) and `GOOGLE_API_KEY` (Google Gemini) in `.env`; optional -- Top 10 AI ranking feature returns 503 if the configured provider's key is missing
 - **Telegram session management**: Separate sessions recommended for dev and prod to avoid revocation; `generate_session.py` script supports creating labeled sessions ("TGUpdates-Dev" / "TGUpdates-Prod")
 - **Startup logging**: No user or feed data is logged at startup
 - **Service worker**: Does not intercept fetch requests (avoids stripping `Authorization` headers on mobile browsers); versioned with cache-clearing on activation
@@ -722,8 +738,11 @@ telethon           # Telegram API client for channel search and private channel 
 ```json
 {
   "refresh_interval_minutes": 5,
-  "max_posts": 30,
-  "scroll_speed": 50
+  "max_posts": 100,
+  "scroll_speed": 50,
+  "media_concurrency": 20,
+  "ai_provider": "gemini",
+  "ai_model": "gemini-2.5-flash"
 }
 ```
 
@@ -761,11 +780,13 @@ telethon           # Telegram API client for channel search and private channel 
 - `get_admin_channels(request, user)`: `GET /api/admin/channels` -- lists all channels the Telethon session is a member of (admin-only)
 - `get_full_config(user)`: `GET /api/admin/config` -- returns config.json (admin-only, 403 for non-admin)
 - `update_config(request, user)`: `POST /api/admin/config` -- updates config.json (admin-only, 403 for non-admin)
-- `get_top_posts(request, user)`: `POST /api/top-posts` -- receives posts array, computes per-post engagement ratio (views/subscribers), sends stripped-down versions to Groq LLM (`llama-3.3-70b-versatile`) with system prompt from `top10_prompt.md`, parses response indices, returns top 10 full post objects
+- `get_top_posts(request, user)`: `POST /api/top-posts` -- receives posts array, computes per-post engagement ratio (views/subscribers), sends stripped-down versions to configured AI provider (Google Gemini or Groq, per `ai_provider`/`ai_model` in `config.json`) with system prompt from `top10_prompt.md`, parses response indices, returns top 10 full post objects
 - `normalize_channel(raw: str) -> str`: Extracts channel name from various URL formats
 - `fetch_channel_html(client, channel) -> str | None`: Async HTTP request with error handling
 - `extract_image_url(style: str) -> str | None`: Regex extraction from CSS `url()` values
 - `parse_channel_posts(html: str, channel: str) -> list[dict]`: BeautifulSoup parsing logic
+- `_merge_grouped_posts(posts) -> list[dict]`: Post-processing for HTML-scraped posts; detects consecutive post IDs with missing text (media album groups) and merges them into single posts
+- `_merge_telethon_grouped(posts) -> list[dict]`: Post-processing for Telethon-fetched posts; uses `grouped_id` to merge album messages into single posts
 - `fetch_private_channel_posts(tg, channel_id, limit) -> list[dict]`: Telethon-based message fetching with base64 media encoding
 - `load_config() -> dict`: JSON config file loader
 - `get_saved_posts(request, user)`: `GET /api/saved` -- returns the logged-in user's saved posts from Supabase
@@ -812,7 +833,9 @@ telethon           # Telegram API client for channel search and private channel 
 - `searchChannels(query)`: Calls `GET /api/search-channels?q=` and populates the autocomplete dropdown
 - `showAutocomplete(items)` / `hideAutocomplete()`: Renders or hides the autocomplete dropdown
 - `selectAutocompleteItem(index)`: Populates the feed input with the selected channel's URL
-- `fetchTop10Posts()`: Sends current feed posts to `POST /api/top-posts` for AI ranking; displays loading state, renders top 10 results, handles errors
+- `fetchTop10Posts(forceRefresh)`: Sends current feed posts to `POST /api/top-posts` for AI ranking; serves from `top10Cache` if available and feed hasn't been refreshed; displays loading state, floating bubble notification, renders top 10 results, handles errors
+- `showFloatingBubble(message)`: Creates a temporary floating bubble notification that fades in, displays for 3 seconds, and auto-removes from the DOM
+- `updateAiModelOptions(provider)`: Populates the AI Model dropdown with models appropriate for the selected provider (Gemini or Groq)
 - `removeFeed(feedUrl)`: Removes a feed via `DELETE /api/feeds`
 - `saveAdminSettings()`: Saves global settings via `POST /api/admin/config` (admin only)
 - `manualSync()`: Manual post refresh with loading states
@@ -828,10 +851,10 @@ telethon           # Telegram API client for channel search and private channel 
 /
 ├── server.py              # FastAPI backend with PWA support, Supabase lifespan, and Telethon integration
 ├── database.py            # Database class encapsulating Supabase async client
-├── config.json            # Global settings (refresh interval, max posts, scroll speed)
-├── top10_prompt.md        # Editable system prompt for Grok LLM Top 10 ranking
+├── config.json            # Global settings (refresh interval, max posts, scroll speed, AI provider/model)
+├── top10_prompt.md        # Editable system prompt for AI Top 10 ranking (with exclusion rules)
 ├── generate_session.py    # Telethon StringSession generator (dev/prod labeled sessions)
-├── .env                   # Environment variables (SUPABASE_URL, SUPABASE_KEY, TELEGRAM_*, GROK_API_KEY)
+├── .env                   # Environment variables (SUPABASE_URL, SUPABASE_KEY, TELEGRAM_*, GROK_API_KEY, GOOGLE_API_KEY)
 ├── requirements.txt       # Python dependencies
 ├── static/
 │   ├── index.html         # Complete frontend application with PWA and share system
@@ -904,5 +927,7 @@ telethon           # Telegram API client for channel search and private channel 
 - **Refresh Interval**: Configurable auto-refresh timing (1-60 minutes)
 - **Max Posts**: Post limit configuration (5-100 posts)
 - **Scroll Speed**: Auto-scroll speed adjustment (10-200 pixels/second)
+- **AI Provider**: Select between Google Gemini and Groq for AI ranking
+- **AI Model**: Model selector populated dynamically based on selected provider (Gemini: gemini-2.0-flash-lite, gemini-2.0-flash, gemini-2.5-flash-lite, gemini-2.5-flash, gemini-2.5-pro; Groq: llama-3.3-70b-versatile, llama-3.1-8b-instant, etc.)
 - **Visibility**: Settings section is only shown when `localStorage.getItem('is_admin') === 'true'`
 - **Persistence**: Saved via `POST /api/admin/config` which overwrites `config.json`

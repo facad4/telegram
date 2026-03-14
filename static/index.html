@@ -254,6 +254,7 @@
     .scroll-viewport {
       flex: 1;
       overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
       position: relative;
       scrollbar-width: thin;
       scrollbar-color: var(--border) transparent;
@@ -1238,6 +1239,7 @@
           <label>AI Provider</label>
           <select id="aiProvider" style="padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--card-bg); color:var(--text); font-size:0.9rem;">
             <option value="gemini">Google Gemini</option>
+            <option value="mistral">Mistral AI</option>
             <option value="groq">Groq</option>
           </select>
         </div>
@@ -1299,7 +1301,7 @@
 
     let allPosts = [];
     let activeFilter = null;
-    let refreshMs = 5 * 60 * 1000;
+    let refreshMs = 60 * 60 * 1000;
     let refreshTimer = null;
     let scrollSpeed = 50;
     let scrollAnimId = null;
@@ -1368,6 +1370,31 @@
     }
 
     let manualScrollTimer = null;
+    let scrollLastTime = null;
+
+    function scrollTick(time) {
+      const viewport = document.getElementById('scrollViewport');
+      if (!scrollLastTime) scrollLastTime = time;
+      const dt = (time - scrollLastTime) / 1000;
+      scrollLastTime = time;
+
+      if (!paused && !isScrollingStopped) {
+        const maxScroll = viewport.scrollHeight - viewport.clientHeight;
+        if (maxScroll > 0) {
+          viewport.scrollTop += scrollSpeed * dt;
+          if (viewport.scrollTop >= maxScroll) {
+            paused = true;
+            setTimeout(() => {
+              viewport.scrollTop = 0;
+              scrollLastTime = null;
+              paused = false;
+            }, 3000);
+          }
+        }
+      }
+
+      scrollAnimId = requestAnimationFrame(scrollTick);
+    }
 
     function startScrolling() {
       const viewport = document.getElementById('scrollViewport');
@@ -1381,31 +1408,8 @@
         if (autoHideHeader && isMobileWidth()) hideHeader();
       }, 2000);
 
-      let lastTime = null;
-      function tick(time) {
-        if (!lastTime) lastTime = time;
-        const dt = (time - lastTime) / 1000;
-        lastTime = time;
-
-        if (!paused && !isScrollingStopped) {
-          const maxScroll = viewport.scrollHeight - viewport.clientHeight;
-          if (maxScroll > 0) {
-            viewport.scrollTop += scrollSpeed * dt;
-            if (viewport.scrollTop >= maxScroll) {
-              paused = true;
-              setTimeout(() => {
-                viewport.scrollTop = 0;
-                lastTime = null;
-                paused = false;
-              }, 3000);
-            }
-          }
-        }
-
-        scrollAnimId = requestAnimationFrame(tick);
-      }
-
-      scrollAnimId = requestAnimationFrame(tick);
+      scrollLastTime = null;
+      scrollAnimId = requestAnimationFrame(scrollTick);
     }
 
     const viewport = document.getElementById('scrollViewport');
@@ -1425,6 +1429,22 @@
       clearTimeout(manualScrollTimer);
       manualScrollTimer = setTimeout(() => { paused = false; }, 4000);
     }, { passive: true });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && currentView !== 'management') {
+        if (scrollAnimId) cancelAnimationFrame(scrollAnimId);
+        scrollLastTime = null;
+        scrollAnimId = requestAnimationFrame(scrollTick);
+      }
+    });
+
+    window.addEventListener('pageshow', (e) => {
+      if (e.persisted && currentView !== 'management') {
+        if (scrollAnimId) cancelAnimationFrame(scrollAnimId);
+        scrollLastTime = null;
+        scrollAnimId = requestAnimationFrame(scrollTick);
+      }
+    });
 
     // Auto-hide header on mobile based on scroll direction
     function isMobileWidth() {
@@ -1823,8 +1843,8 @@
       }
 
       dot.classList.add('loading');
-      text.textContent = 'Analyzing posts with AI...';
-      container.innerHTML = '<div class="loading-container"><div class="spinner"></div><span>Analyzing posts with AI...</span></div>';
+      text.textContent = 'Generating AI Top 10 most important posts.';
+      container.innerHTML = '<div class="loading-container"><div class="spinner"></div><span>Generating AI Top 10 most important posts.</span></div>';
 
       try {
         let postsToAnalyze = mainFeedPostsCache;
@@ -1924,7 +1944,7 @@
           const provider = config.ai_provider || 'gemini';
           document.getElementById('aiProvider').value = provider;
           updateAiModelOptions(provider);
-          document.getElementById('aiModel').value = config.ai_model || 'gemini-2.0-flash-lite';
+          document.getElementById('aiModel').value = config.ai_model || 'mistral-small-2506';
         } catch (e) {
           console.error('Failed to load admin config:', e);
         }
@@ -2196,6 +2216,12 @@
         'gemini-2.5-flash',
         'gemini-2.5-pro',
       ],
+      mistral: [
+        'mistral-small-2506',
+        'mistral-small-latest',
+        'mistral-medium-latest',
+        'mistral-large-latest',
+      ],
       groq: [
         'llama-3.3-70b-versatile',
         'llama-3.1-8b-instant',
@@ -2233,6 +2259,12 @@
         if (result.status === 'success') {
           alert('Settings saved successfully!');
           await fetchConfig();
+          if (refreshTimer) clearInterval(refreshTimer);
+          refreshTimer = setInterval(() => {
+            if (currentView === 'main') {
+              fetchPosts();
+            }
+          }, refreshMs);
         } else {
           alert('Failed to save settings: ' + (result.message || result.detail));
         }
