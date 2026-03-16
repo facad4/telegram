@@ -15,4 +15,6 @@ start.sh
 groq_test.py
 avatar_cache/
 thumb_cache/
+response_news.md
+test_web_search.py
 

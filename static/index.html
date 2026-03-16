@@ -719,6 +719,28 @@
         font-size: 0.9rem;
         padding: 10px 16px;
       }
+
+      .autocomplete-popup {
+        width: calc(100vw - 24px);
+        max-height: 70vh;
+      }
+
+      .autocomplete-item {
+        padding: 12px 14px;
+        gap: 10px;
+      }
+
+      .autocomplete-item-title {
+        font-size: 1rem;
+      }
+
+      .autocomplete-item-username {
+        font-size: 0.88rem;
+      }
+
+      .autocomplete-item-members {
+        font-size: 0.82rem;
+      }
     }
 
     /* Management Interface Styles */
@@ -838,43 +860,104 @@
       background: #1976d2;
     }
 
-    .feed-input-wrapper {
-      position: relative;
-      flex: 1;
+    .autocomplete-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.4);
+      z-index: 999;
+      display: none;
     }
 
-    .autocomplete-dropdown {
-      position: absolute;
-      top: 100%;
-      left: 0;
-      right: 0;
+    .autocomplete-popup {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 520px;
+      max-width: calc(100vw - 32px);
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-top: none;
-      border-radius: 0 0 6px 6px;
-      max-height: 260px;
-      overflow-y: auto;
-      z-index: 20;
+      border-radius: var(--radius);
+      z-index: 1000;
       display: none;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+      overflow: hidden;
+      max-height: 80vh;
+      display: none;
+      flex-direction: column;
+    }
+
+    .autocomplete-popup-header {
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .autocomplete-popup-header input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 14px;
+      color: var(--text);
+      font-size: 1rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    .autocomplete-popup-header input:focus {
+      border-color: var(--accent);
+    }
+
+    .autocomplete-popup-error {
+      padding: 0 18px;
+      color: #ef5350;
+      font-size: 0.85rem;
+      min-height: 0;
+      flex-shrink: 0;
+      transition: all 0.15s;
+    }
+
+    .autocomplete-popup-error:not(:empty) {
+      padding: 8px 18px 0;
+    }
+
+    .autocomplete-popup-results {
+      overflow-y: auto;
+      flex: 1;
       scrollbar-width: thin;
       scrollbar-color: var(--border) transparent;
     }
 
-    .autocomplete-dropdown::-webkit-scrollbar { width: 5px; }
-    .autocomplete-dropdown::-webkit-scrollbar-track { background: transparent; }
-    .autocomplete-dropdown::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    .autocomplete-popup-results::-webkit-scrollbar { width: 6px; }
+    .autocomplete-popup-results::-webkit-scrollbar-track { background: transparent; }
+    .autocomplete-popup-results::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    .autocomplete-popup-hint {
+      padding: 24px 18px;
+      text-align: center;
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+    }
 
     .autocomplete-item {
       display: flex;
       align-items: center;
-      gap: 10px;
-      padding: 8px 10px;
+      gap: 14px;
+      padding: 14px 18px;
       cursor: pointer;
-      transition: background 0.12s;
+      transition: background 0.12s, border-color 0.12s;
+      border-left: 3px solid transparent;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .autocomplete-item:last-child {
+      border-bottom: none;
     }
 
     .autocomplete-item:hover, .autocomplete-item.active {
       background: var(--accent-light);
+      border-left-color: var(--accent);
     }
 
     .autocomplete-item-info {
@@ -883,30 +966,52 @@
     }
 
     .autocomplete-item-title {
-      font-size: 0.88rem;
+      font-size: 1.1rem;
       color: var(--text);
-      font-weight: 500;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      font-weight: 600;
+      word-break: break-word;
     }
 
     .autocomplete-item-username {
-      font-size: 0.78rem;
-      color: var(--text-secondary);
+      font-size: 0.95rem;
+      color: var(--accent);
+      margin-top: 2px;
     }
 
     .autocomplete-item-members {
-      font-size: 0.75rem;
+      font-size: 0.9rem;
       color: var(--text-secondary);
       flex-shrink: 0;
+      font-weight: 500;
     }
 
     .autocomplete-loading {
-      padding: 10px;
+      padding: 18px;
       text-align: center;
       color: var(--text-secondary);
+      font-size: 1rem;
+    }
+
+    .autocomplete-item-add {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
       font-size: 0.85rem;
+      font-weight: 500;
+      flex-shrink: 0;
+      transition: opacity 0.15s;
+    }
+
+    .autocomplete-item-add:hover {
+      opacity: 0.85;
+    }
+
+    .autocomplete-item-add:disabled {
+      opacity: 0.5;
+      cursor: default;
     }
 
     .settings-grid {
@@ -1178,15 +1283,7 @@
     <div class="management-section">
       <h3>My Channels</h3>
       <div class="channel-list" id="feedList"></div>
-      <div style="display:flex; gap:8px; align-items:center; margin-top:10px;">
-        <div class="feed-input-wrapper">
-          <input type="text" id="newFeedUrl" placeholder="Search channels or paste URL" autocomplete="off" style="width:100%; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:8px 10px; color:var(--text); font-size:0.9rem;">
-          <div class="autocomplete-dropdown" id="autocompleteDropdown"></div>
-        </div>
-        <button class="add-btn" id="addFeedBtn">Add</button>
-      </div>
-      <div id="feedError" style="color:#ef5350; font-size:0.85rem; margin-top:6px; min-height:1.2em;"></div>
-      <div style="color:var(--text-secondary); font-size:0.78rem; margin-top:4px;">Channel search suggestions appear after 4+ characters.</div>
+      <button class="add-btn" id="addFeedBtn" style="margin-top:10px;">+ Add Channel</button>
     </div>
 
     <div class="management-section">
@@ -1250,6 +1347,16 @@
         </div>
       </div>
       <button class="add-btn" id="saveSettingsBtn" style="margin-top:10px;">Save Settings</button>
+    </div>
+  </div>
+  <div class="autocomplete-backdrop" id="autocompleteBackdrop"></div>
+  <div class="autocomplete-popup" id="autocompletePopup">
+    <div class="autocomplete-popup-header">
+      <input type="text" id="acPopupInput" placeholder="Search channels or paste URL..." autocomplete="off">
+    </div>
+    <div class="autocomplete-popup-error" id="acPopupError"></div>
+    <div class="autocomplete-popup-results" id="acPopupResults">
+      <div class="autocomplete-popup-hint">Type at least 4 characters to search for channels</div>
     </div>
   </div>
   </div><!-- end appContainer -->
@@ -1978,13 +2085,105 @@
       }
     }
 
-    async function addFeed() {
-      const input = document.getElementById('newFeedUrl');
-      const errorEl = document.getElementById('feedError');
+    // --- Add Channel Popup with autocomplete ---
+    let acDebounceTimer = null;
+    let acActiveIndex = -1;
+    let acResults = [];
+
+    function formatMemberCount(count) {
+      if (!count) return '';
+      if (count >= 1_000_000) return (count / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+      if (count >= 1_000) return (count / 1_000).toFixed(1).replace(/\.0$/, '') + 'K';
+      return String(count);
+    }
+
+    function openAddChannelPopup() {
+      const backdrop = document.getElementById('autocompleteBackdrop');
+      const popup = document.getElementById('autocompletePopup');
+      const input = document.getElementById('acPopupInput');
+      const errorEl = document.getElementById('acPopupError');
+      const results = document.getElementById('acPopupResults');
+      errorEl.textContent = '';
+      input.value = '';
+      results.innerHTML = '<div class="autocomplete-popup-hint">Type at least 4 characters to search for channels</div>';
+      acResults = [];
+      acActiveIndex = -1;
+      backdrop.style.display = 'block';
+      popup.style.display = 'flex';
+      setTimeout(() => input.focus(), 50);
+    }
+
+    function closeAddChannelPopup() {
+      document.getElementById('autocompleteBackdrop').style.display = 'none';
+      document.getElementById('autocompletePopup').style.display = 'none';
+      document.getElementById('acPopupError').textContent = '';
+      acResults = [];
+      acActiveIndex = -1;
+      clearTimeout(acDebounceTimer);
+    }
+
+    function renderAcResults(items) {
+      const resultsEl = document.getElementById('acPopupResults');
+      acResults = items;
+      acActiveIndex = -1;
+      if (!items.length) {
+        resultsEl.innerHTML = '<div class="autocomplete-popup-hint">No channels found</div>';
+        return;
+      }
+      resultsEl.innerHTML = items.map((ch, i) => `
+        <div class="autocomplete-item" data-index="${i}">
+          <div class="autocomplete-item-info">
+            <div class="autocomplete-item-title">${ch.title}</div>
+            <div class="autocomplete-item-username">@${ch.username}</div>
+          </div>
+          ${ch.participants_count ? `<div class="autocomplete-item-members">${formatMemberCount(ch.participants_count)} members</div>` : ''}
+          <button class="autocomplete-item-add" data-index="${i}">Add</button>
+        </div>
+      `).join('');
+
+      resultsEl.querySelectorAll('.autocomplete-item-add').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          addChannelFromPopup(parseInt(btn.dataset.index), btn);
+        });
+      });
+    }
+
+    async function addChannelFromPopup(index, btn) {
+      if (index < 0 || index >= acResults.length) return;
+      const ch = acResults[index];
+      const url = 'https://t.me/' + ch.username;
+      const errorEl = document.getElementById('acPopupError');
+      errorEl.textContent = '';
+      btn.disabled = true;
+      btn.textContent = '...';
+      try {
+        const resp = await authFetch('/api/feeds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ feed_url: url })
+        });
+        if (resp.status === 409) {
+          errorEl.textContent = 'Feed already exists.';
+          btn.textContent = 'Added';
+          return;
+        }
+        if (!resp.ok) throw new Error('Failed to add feed');
+        btn.textContent = 'Added';
+        await loadFeedList();
+      } catch (e) {
+        errorEl.textContent = 'Error: ' + e.message;
+        btn.disabled = false;
+        btn.textContent = 'Add';
+      }
+    }
+
+    async function addFeedByUrl() {
+      const input = document.getElementById('acPopupInput');
+      const errorEl = document.getElementById('acPopupError');
       const url = input.value.trim();
       errorEl.textContent = '';
-      if (!url) { errorEl.textContent = 'Please enter a channel URL.'; return; }
-
+      if (!url) return;
       try {
         const resp = await authFetch('/api/feeds', {
           method: 'POST',
@@ -1998,125 +2197,89 @@
         if (!resp.ok) throw new Error('Failed to add feed');
         input.value = '';
         await loadFeedList();
+        closeAddChannelPopup();
       } catch (e) {
-        errorEl.textContent = 'Error adding feed: ' + e.message;
+        errorEl.textContent = 'Error: ' + e.message;
       }
-    }
-
-    // --- Autocomplete for channel search ---
-    let acDebounceTimer = null;
-    let acActiveIndex = -1;
-    let acResults = [];
-
-    function formatMemberCount(count) {
-      if (!count) return '';
-      if (count >= 1_000_000) return (count / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
-      if (count >= 1_000) return (count / 1_000).toFixed(1).replace(/\.0$/, '') + 'K';
-      return String(count);
-    }
-
-    function showAutocomplete(items) {
-      const dropdown = document.getElementById('autocompleteDropdown');
-      acResults = items;
-      acActiveIndex = -1;
-      if (!items.length) {
-        dropdown.style.display = 'none';
-        return;
-      }
-      dropdown.innerHTML = items.map((ch, i) => `
-        <div class="autocomplete-item" data-index="${i}" data-username="${ch.username}">
-          <div class="autocomplete-item-info">
-            <div class="autocomplete-item-title">${ch.title}</div>
-            <div class="autocomplete-item-username">@${ch.username}</div>
-          </div>
-          ${ch.participants_count ? `<div class="autocomplete-item-members">${formatMemberCount(ch.participants_count)} members</div>` : ''}
-        </div>
-      `).join('');
-      dropdown.style.display = 'block';
-
-      dropdown.querySelectorAll('.autocomplete-item').forEach(el => {
-        el.addEventListener('mousedown', (e) => {
-          e.preventDefault();
-          selectAutocompleteItem(parseInt(el.dataset.index));
-        });
-      });
-    }
-
-    function selectAutocompleteItem(index) {
-      if (index < 0 || index >= acResults.length) return;
-      const ch = acResults[index];
-      document.getElementById('newFeedUrl').value = 'https://t.me/' + ch.username;
-      hideAutocomplete();
-    }
-
-    function hideAutocomplete() {
-      document.getElementById('autocompleteDropdown').style.display = 'none';
-      acResults = [];
-      acActiveIndex = -1;
     }
 
     async function searchChannels(query) {
-      const dropdown = document.getElementById('autocompleteDropdown');
-      if (query.length < 2) {
-        hideAutocomplete();
+      const resultsEl = document.getElementById('acPopupResults');
+      if (query.length < 4) {
+        resultsEl.innerHTML = '<div class="autocomplete-popup-hint">Type at least 4 characters to search for channels</div>';
+        acResults = [];
         return;
       }
-      dropdown.innerHTML = '<div class="autocomplete-loading">Searching...</div>';
-      dropdown.style.display = 'block';
+      resultsEl.innerHTML = '<div class="autocomplete-loading">Searching...</div>';
       try {
         const resp = await authFetch('/api/search-channels?q=' + encodeURIComponent(query));
-        if (!resp.ok) { hideAutocomplete(); return; }
+        if (!resp.ok) {
+          resultsEl.innerHTML = '<div class="autocomplete-popup-hint">Search failed</div>';
+          return;
+        }
         const results = await resp.json();
-        showAutocomplete(results);
+        renderAcResults(results);
       } catch (e) {
-        hideAutocomplete();
+        resultsEl.innerHTML = '<div class="autocomplete-popup-hint">Search failed</div>';
       }
     }
 
     function setupAutocomplete() {
-      const input = document.getElementById('newFeedUrl');
+      const input = document.getElementById('acPopupInput');
+      const backdrop = document.getElementById('autocompleteBackdrop');
 
       input.addEventListener('input', () => {
         clearTimeout(acDebounceTimer);
         const val = input.value.trim();
         if (val.startsWith('http://') || val.startsWith('https://') || val.startsWith('t.me/')) {
-          hideAutocomplete();
+          document.getElementById('acPopupResults').innerHTML = '<div class="autocomplete-popup-hint">Press Enter to add this URL</div>';
+          acResults = [];
           return;
         }
         acDebounceTimer = setTimeout(() => searchChannels(val), 300);
       });
 
       input.addEventListener('keydown', (e) => {
-        const dropdown = document.getElementById('autocompleteDropdown');
-        if (dropdown.style.display !== 'block' || !acResults.length) return;
+        const resultsEl = document.getElementById('acPopupResults');
 
-        if (e.key === 'ArrowDown') {
+        if (acResults.length) {
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            acActiveIndex = Math.min(acActiveIndex + 1, acResults.length - 1);
+            updateActiveItem();
+            return;
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            acActiveIndex = Math.max(acActiveIndex - 1, 0);
+            updateActiveItem();
+            return;
+          }
+        }
+
+        if (e.key === 'Enter') {
           e.preventDefault();
-          acActiveIndex = Math.min(acActiveIndex + 1, acResults.length - 1);
-          updateActiveItem();
-        } else if (e.key === 'ArrowUp') {
-          e.preventDefault();
-          acActiveIndex = Math.max(acActiveIndex - 1, 0);
-          updateActiveItem();
-        } else if (e.key === 'Enter' && acActiveIndex >= 0) {
-          e.preventDefault();
-          selectAutocompleteItem(acActiveIndex);
+          if (acActiveIndex >= 0 && acResults.length) {
+            const btn = resultsEl.querySelector(`.autocomplete-item[data-index="${acActiveIndex}"] .autocomplete-item-add`);
+            if (btn && !btn.disabled) addChannelFromPopup(acActiveIndex, btn);
+          } else {
+            addFeedByUrl();
+          }
         } else if (e.key === 'Escape') {
-          hideAutocomplete();
+          closeAddChannelPopup();
         }
       });
 
-      input.addEventListener('blur', () => {
-        setTimeout(hideAutocomplete, 150);
+      backdrop.addEventListener('click', () => {
+        closeAddChannelPopup();
       });
     }
 
     function updateActiveItem() {
-      const dropdown = document.getElementById('autocompleteDropdown');
-      dropdown.querySelectorAll('.autocomplete-item').forEach((el, i) => {
+      const resultsEl = document.getElementById('acPopupResults');
+      resultsEl.querySelectorAll('.autocomplete-item').forEach((el, i) => {
         el.classList.toggle('active', i === acActiveIndex);
       });
-      const active = dropdown.querySelector('.autocomplete-item.active');
+      const active = resultsEl.querySelector('.autocomplete-item.active');
       if (active) active.scrollIntoView({ block: 'nearest' });
     }
 
@@ -2357,16 +2520,13 @@
       document.getElementById('syncBtn').addEventListener('click', manualSync);
       document.getElementById('orderBtn').addEventListener('click', toggleSortOrder);
       document.getElementById('stopScrollBtn').addEventListener('click', toggleStopScrolling);
-      document.getElementById('addFeedBtn').addEventListener('click', addFeed);
+      document.getElementById('addFeedBtn').addEventListener('click', openAddChannelPopup);
       document.getElementById('loadPrivateChannelsBtn').addEventListener('click', loadPrivateChannels);
       document.getElementById('saveSettingsBtn').addEventListener('click', saveAdminSettings);
       document.getElementById('aiProvider').addEventListener('change', (e) => {
         updateAiModelOptions(e.target.value);
       });
 
-      document.getElementById('newFeedUrl').addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && acActiveIndex < 0) { e.preventDefault(); addFeed(); }
-      });
       setupAutocomplete();
 
       applyAutoHideHeader();
