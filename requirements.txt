@@ -4,3 +4,4 @@ beautifulsoup4
 supabase
 python-dotenv
 telethon
+tavily-python

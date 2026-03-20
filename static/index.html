@@ -1073,6 +1073,170 @@
       fill: currentColor;
     }
 
+    .context-btn {
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      color: var(--accent);
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 1rem;
+      font-weight: 500;
+      padding: 0;
+      transition: opacity 0.15s;
+      margin-right: 10px;
+    }
+
+    .context-btn:hover {
+      opacity: 0.82;
+    }
+
+    .context-btn.loading {
+      opacity: 0.6;
+      cursor: wait;
+    }
+
+    .context-btn svg {
+      width: 17px;
+      height: 17px;
+      fill: currentColor;
+    }
+
+    .context-btn.loading svg {
+      animation: spin 1s linear infinite;
+    }
+
+    .context-summary-container {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.3s ease-out;
+      margin-top: 0;
+    }
+
+    .context-summary-container.expanded {
+      max-height: 2000px;
+      margin-top: 16px;
+    }
+
+    .context-summary-content {
+      background: #FFFEF8;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px 20px;
+      animation: fadeIn 0.3s ease-in;
+      position: relative;
+    }
+
+    [data-theme="dark"] .context-summary-content {
+      background: var(--bg);
+    }
+
+    .context-summary-close {
+      display: block;
+      text-align: center;
+      margin-top: 12px;
+      padding: 12px 0 0 0;
+      border-top: 1px solid var(--border);
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .context-summary-close:hover {
+      background: var(--accent-light);
+    }
+
+    .context-summary-close-link {
+      color: var(--accent);
+      font-size: 0.9rem;
+      font-weight: 500;
+      transition: opacity 0.15s;
+      pointer-events: none;
+    }
+
+    .context-summary-close:hover .context-summary-close-link {
+      opacity: 0.8;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    .context-summary-loading {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--text-secondary);
+      font-size: 0.95rem;
+      padding: 12px;
+    }
+
+    .context-summary-loading .spinner {
+      width: 20px;
+      height: 20px;
+      border-width: 2px;
+    }
+
+    .context-summary-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--accent);
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .context-summary-text {
+      color: var(--text);
+      font-size: 1rem;
+      line-height: 1.6;
+      margin-bottom: 12px;
+    }
+
+    .context-summary-text ul {
+      margin: 8px 0;
+      padding-left: 20px;
+    }
+
+    .context-summary-text li {
+      margin: 6px 0;
+    }
+
+    .context-summary-sources {
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+
+    .context-summary-sources-title {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 8px;
+    }
+
+    .context-summary-source {
+      font-size: 0.85rem;
+      margin: 4px 0;
+    }
+
+    .context-summary-source a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .context-summary-source a:hover {
+      text-decoration: underline;
+    }
+
+    .context-summary-error {
+      color: #ef5350;
+      font-size: 0.95rem;
+      padding: 12px;
+    }
+
     .theme-toggle-group {
       display: flex;
       gap: 8px;
@@ -1344,6 +1508,34 @@
           <label>AI Model</label>
           <select id="aiModel" style="padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--card-bg); color:var(--text); font-size:0.9rem;">
           </select>
+        </div>
+        <div class="setting-item">
+          <label>Context Search Provider</label>
+          <select id="contextProviderSelect" style="padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--card-bg); color:var(--text); font-size:0.9rem; width: 100%;">
+            <option value="gemini">Google Gemini (with Google Search)</option>
+            <option value="mistral">Mistral AI + Tavily</option>
+          </select>
+        </div>
+        <div id="mistralContextSettings" style="display: none;">
+          <div class="setting-item">
+            <label>Mistral Model</label>
+            <select id="contextMistralModelSelect" style="padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--card-bg); color:var(--text); font-size:0.9rem; width: 100%;">
+              <option value="mistral-small-latest">Mistral Small</option>
+              <option value="mistral-medium-latest">Mistral Medium</option>
+              <option value="mistral-large-latest">Mistral Large</option>
+            </select>
+          </div>
+          <div class="setting-item">
+            <label>Tavily Search Depth</label>
+            <select id="tavilyDepthSelect" style="padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--card-bg); color:var(--text); font-size:0.9rem; width: 100%;">
+              <option value="basic">Basic</option>
+              <option value="advanced">Advanced</option>
+            </select>
+          </div>
+          <div class="setting-item">
+            <label>Max Search Results</label>
+            <input type="number" id="tavilyMaxResults" min="3" max="10" value="5" style="padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--card-bg); color:var(--text); font-size:0.9rem; width: 100%;">
+          </div>
         </div>
       </div>
       <button class="add-btn" id="saveSettingsBtn" style="margin-top:10px;">Save Settings</button>
@@ -1829,10 +2021,15 @@
                   <svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7a2.52 2.52 0 0 0 0-1.39l7-4.11A2.99 2.99 0 1 0 15 5a2.98 2.98 0 0 0 .05.54l-7.1 4.17a3 3 0 1 0 0 4.58l7.09 4.17c-.03.17-.04.35-.04.54a3 3 0 1 0 3-2.92z"/></svg>
                   <span class="share-btn-label">Share</span>
                 </button>
+                <button class="context-btn" data-post-text="${post.text_plain.replace(/"/g, '&quot;')}" data-post-url="${post.post_url}" data-channel="${post.channel}" data-postid="${post.post_id}" onclick="event.stopPropagation(); event.preventDefault(); toggleContextSummary(this)" title="Get context from web">
+                  <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
+                  <span class="context-btn-label">More</span>
+                </button>
                 <button class="save-btn ${isSaved ? 'saved' : ''}" data-channel="${post.channel}" data-postid="${post.post_id}" onclick="event.stopPropagation(); toggleSave(this)" title="${isSaved ? 'Remove from saved' : 'Save for later'}">
                   ${isSaved ? bookmarkFilled : bookmarkOutline}
                 </button>
               </div>
+              <div class="context-summary-container" id="context-${post.channel}-${post.post_id}"></div>
             </div>
           </div>`;
       }).join('');
@@ -2030,6 +2227,111 @@
       }
     }
 
+    // Context summary functions
+    let activeContextContainer = null;
+
+    async function toggleContextSummary(btn) {
+      const postText = btn.dataset.postText;
+      const postUrl = btn.dataset.postUrl;
+      const channel = btn.dataset.channel;
+      const postId = btn.dataset.postid;
+      
+      const postCard = btn.closest('.post-content');
+      const container = postCard.querySelector('.context-summary-container');
+      
+      // If this container is already expanded, collapse it
+      if (container.classList.contains('expanded')) {
+        hideContextSummary(container);
+        activeContextContainer = null;
+        return;
+      }
+      
+      // Collapse any other open summary
+      if (activeContextContainer && activeContextContainer !== container) {
+        hideContextSummary(activeContextContainer);
+      }
+      
+      activeContextContainer = container;
+      
+      // Show loading state
+      container.innerHTML = `
+        <div class="context-summary-content">
+          <div class="context-summary-loading">
+            <div class="spinner"></div>
+            <span>Searching the web...</span>
+          </div>
+        </div>
+      `;
+      container.classList.add('expanded');
+      
+      // Add loading state to button
+      btn.classList.add('loading');
+      btn.disabled = true;
+      
+      try {
+        const resp = await authFetch('/api/context-summary', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ post_text: postText, post_url: postUrl })
+        });
+        
+        if (!resp.ok) {
+          const error = await resp.json();
+          throw new Error(error.detail || 'Failed to generate summary');
+        }
+        
+        const data = await resp.json();
+        showContextSummary(container, data.summary, data.sources);
+      } catch (error) {
+        container.innerHTML = `
+          <div class="context-summary-content">
+            <div class="context-summary-error">
+              Failed to generate context summary: ${error.message}
+            </div>
+          </div>
+        `;
+      } finally {
+        btn.classList.remove('loading');
+        btn.disabled = false;
+      }
+    }
+
+    function showContextSummary(container, summary, sources) {
+      let sourcesHtml = '';
+      if (sources && sources.length > 0) {
+        sourcesHtml = `
+          <div class="context-summary-sources">
+            <div class="context-summary-sources-title">Sources</div>
+            ${sources.map(s => `
+              <div class="context-summary-source">
+                • <a href="${s.url}" target="_blank" rel="noopener noreferrer">${s.title || s.url}</a>
+              </div>
+            `).join('')}
+          </div>
+        `;
+      }
+      
+      container.innerHTML = `
+        <div class="context-summary-content">
+          <div class="context-summary-text" dir="auto">${summary.replace(/\n/g, '<br>')}</div>
+          ${sourcesHtml}
+          <div class="context-summary-close" onclick="event.stopPropagation(); hideContextSummary(this.closest('.context-summary-container'))">
+            <span class="context-summary-close-link">Close</span>
+          </div>
+        </div>
+      `;
+    }
+
+    function hideContextSummary(container) {
+      container.classList.remove('expanded');
+      if (activeContextContainer === container) {
+        activeContextContainer = null;
+      }
+      setTimeout(() => {
+        container.innerHTML = '';
+      }, 300);
+    }
+
     // Management interface functions
     async function loadManagementInterface() {
       const isAdmin = localStorage.getItem('is_admin') === 'true';
@@ -2052,6 +2354,19 @@
           document.getElementById('aiProvider').value = provider;
           updateAiModelOptions(provider);
           document.getElementById('aiModel').value = config.ai_model || 'mistral-large-latest';
+          
+          const contextProvider = config.context_provider || 'gemini';
+          document.getElementById('contextProviderSelect').value = contextProvider;
+          document.getElementById('contextMistralModelSelect').value = config.context_mistral_model || 'mistral-large-latest';
+          document.getElementById('tavilyDepthSelect').value = config.context_tavily_depth || 'basic';
+          document.getElementById('tavilyMaxResults').value = config.context_tavily_max_results || 5;
+          
+          const mistralSettings = document.getElementById('mistralContextSettings');
+          mistralSettings.style.display = contextProvider === 'mistral' ? 'block' : 'none';
+          
+          document.getElementById('contextProviderSelect').addEventListener('change', (e) => {
+            mistralSettings.style.display = e.target.value === 'mistral' ? 'block' : 'none';
+          });
         } catch (e) {
           console.error('Failed to load admin config:', e);
         }
@@ -2410,7 +2725,11 @@
         scroll_speed: parseInt(document.getElementById('scrollSpeed').value),
         media_concurrency: parseInt(document.getElementById('mediaConcurrency').value),
         ai_provider: document.getElementById('aiProvider').value,
-        ai_model: document.getElementById('aiModel').value
+        ai_model: document.getElementById('aiModel').value,
+        context_provider: document.getElementById('contextProviderSelect').value,
+        context_mistral_model: document.getElementById('contextMistralModelSelect').value,
+        context_tavily_depth: document.getElementById('tavilyDepthSelect').value,
+        context_tavily_max_results: parseInt(document.getElementById('tavilyMaxResults').value)
       };
       try {
         const resp = await authFetch('/api/admin/config', {

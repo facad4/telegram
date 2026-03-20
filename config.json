@@ -4,5 +4,9 @@
   "scroll_speed": 50,
   "media_concurrency": 20,
   "ai_provider": "mistral",
-  "ai_model": "mistral-large-latest"
+  "ai_model": "mistral-large-latest",
+  "context_provider": "mistral",
+  "context_mistral_model": "mistral-large-latest",
+  "context_tavily_depth": "advanced",
+  "context_tavily_max_results": 5
 }

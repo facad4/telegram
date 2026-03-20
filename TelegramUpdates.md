@@ -8,7 +8,7 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - **Database**: Supabase (PostgreSQL) via async Python SDK, encapsulated in `database.py`
 - **Frontend**: Single-page vanilla HTML/CSS/JavaScript application (`static/index.html`) with auto-scrolling tiles
 - **Configuration**: `config.json` for global settings; per-user channel feeds stored in Supabase `Feeds` table
-- **Environment**: `.env` file for secrets (`SUPABASE_URL`, `SUPABASE_KEY`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION`, `GROK_API_KEY`, `GOOGLE_API_KEY`) loaded via `python-dotenv`
+- **Environment**: `.env` file for secrets (`SUPABASE_URL`, `SUPABASE_KEY`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION`, `GROK_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, `TAVILY_API_KEY`) loaded via `python-dotenv`
 - **Dependencies**: FastAPI, httpx, BeautifulSoup4, supabase, python-dotenv, telethon (see `requirements.txt`)
 
 ## Core Features
@@ -37,9 +37,24 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
     "scroll_speed": 50,
     "media_concurrency": 20,
     "ai_provider": "gemini",
-    "ai_model": "gemini-2.5-flash"
+    "ai_model": "gemini-2.5-flash",
+    "context_provider": "gemini",
+    "context_mistral_model": "mistral-large-latest",
+    "context_tavily_depth": "basic",
+    "context_tavily_max_results": 5
   }
   ```
+- **Settings**:
+  - `refresh_interval_minutes`: Auto-refresh interval for main feed (1-60 minutes)
+  - `max_posts`: Maximum posts to display (5-100)
+  - `scroll_speed`: Auto-scroll speed in pixels/second (10-200)
+  - `media_concurrency`: Concurrent media downloads (1-20)
+  - `ai_provider`: AI provider for Top 10 ranking - "gemini", "mistral", or "groq"
+  - `ai_model`: Model name for the selected AI provider
+  - `context_provider`: Context search provider for "More" button - "gemini" or "mistral"
+  - `context_mistral_model`: Mistral model for context search (when `context_provider` is "mistral")
+  - `context_tavily_depth`: Tavily search depth - "basic" or "advanced" (when `context_provider` is "mistral")
+  - `context_tavily_max_results`: Number of search results to fetch (3-10, when `context_provider` is "mistral")
 - Editable only by admin user (`id = 1`) via the management interface
 
 ### 2. Data Fetching
@@ -210,6 +225,47 @@ Sends the user's current feed posts to a configurable AI provider (Google Gemini
 - 502: `{ "detail": "AI service request failed" }` (API error)
 - 502: `{ "detail": "Failed to parse AI response" }` (invalid response format)
 - 503: `{ "detail": "AI ranking not configured (GOOGLE_API_KEY missing)" }` or `{ "detail": "AI ranking not configured (GROQ_API_KEY missing)" }` depending on provider
+
+#### `POST /api/context-summary` (protected)
+Generates contextual information for a Telegram post using web search. Supports two providers: Google Gemini (with built-in Google Search grounding) or Mistral AI + Tavily (explicit web search). Provider is configurable via `context_provider` in `config.json`.
+
+**Request body**:
+```json
+{ "post_text": "The Telegram post text to analyze" }
+```
+
+**Implementation**:
+
+**Gemini Provider** (`context_provider: "gemini"`):
+- Uses Google Gemini API with Google Search grounding tool
+- Reads system prompt from `context_summary_prompt.md`
+- Calls `gemini-2.5-flash` model with search tool enabled
+- Extracts sources from grounding metadata
+
+**Mistral + Tavily Provider** (`context_provider: "mistral"`):
+- Uses `WebSearch` class from `web_search.py`
+- Step 1: Generates search terms using Mistral AI (reads `search_terms.md` prompt)
+- Step 2: Searches web using Tavily API with configurable depth and max results
+- Step 3: Summarizes results using Mistral AI (reads `summarize.md` prompt)
+- Configuration: `context_mistral_model`, `context_tavily_depth`, `context_tavily_max_results` from `config.json`
+
+**Success response** (200):
+```json
+{
+  "summary": "Contextual information about the post",
+  "sources": [
+    { "title": "Source Title", "url": "https://example.com" }
+  ]
+}
+```
+
+**Error responses**:
+- 400: `{ "detail": "post_text is required" }` (missing post text)
+- 500: `{ "detail": "context_summary_prompt.md not found" }` (Gemini: missing prompt file)
+- 502: `{ "detail": "Failed to generate context summary: ..." }` (API error)
+- 503: `{ "detail": "Context summary not configured (GOOGLE_API_KEY missing)" }` (Gemini provider)
+- 503: `{ "detail": "Context summary not configured (MISTRAL_API_KEY missing)" }` (Mistral provider)
+- 503: `{ "detail": "Context summary not configured (TAVILY_API_KEY missing)" }` (Mistral provider)
 
 #### `GET /api/feeds` (protected)
 Returns the logged-in user's feeds from Supabase as objects with metadata.
@@ -489,6 +545,26 @@ Each post tile has a Share button in the footer (between views count and save bu
 - **Token Efficiency**: Backend strips heavy fields (HTML, base64 images) and truncates text before sending to the LLM
 - **Error Handling**: Graceful error display if AI service is unavailable or misconfigured
 
+#### Context Search ("More" Button)
+- **Trigger**: "More" button in each post's footer (between views count and save button)
+- **Purpose**: Provides additional context and background information for a post by searching the web and synthesizing results
+- **UI**: Expandable section below the post that displays the summary and sources
+- **Loading State**: Spinner with "Searching the web..." message during the API call
+- **Multi-Provider Support**: Two providers available, configurable via admin settings (`context_provider` in `config.json`):
+  - **Google Gemini** (default): Uses Gemini 2.5 Flash with built-in Google Search grounding tool
+    - System prompt: `context_summary_prompt.md`
+    - Automatically searches and grounds responses in web results
+    - Sources extracted from grounding metadata
+  - **Mistral AI + Tavily**: Uses Mistral AI for analysis and Tavily API for web search
+    - Three-step process: generate search terms → search web → summarize results
+    - Prompts: `search_terms.md` (term extraction), `summarize.md` (synthesis)
+    - Configurable: model (`context_mistral_model`), search depth (`context_tavily_depth`), max results (`context_tavily_max_results`)
+- **Language Support**: Both providers support Hebrew and English; responses match the input language
+- **Display**: Summary text with bullet points, followed by clickable source links
+- **Interaction**: Click "More" again or "Close" link to collapse the summary
+- **Single Expansion**: Only one context summary can be open at a time; opening a new one closes the previous
+- **Error Handling**: Graceful error display if API keys are missing or service is unavailable
+
 #### Content Processing
 - **HTML sanitization**: `sanitizeHtml()` function removes `onclick`, adds security attributes
 - **Date formatting**: Relative time display (minutes/hours/days ago) with fallback to date
@@ -717,7 +793,7 @@ telethon           # Telegram API client for channel search and private channel 
 - **User-Agent spoofing**: Uses Chrome UA to avoid bot detection
 - **Supabase credentials**: Stored in `.env` file (excluded from git via `.gitignore`); loaded at runtime via `python-dotenv`
 - **Telegram API credentials**: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and `TELEGRAM_SESSION` in `.env`; optional -- channel search and private channel access are disabled if not configured
-- **AI API credentials**: `GROK_API_KEY` (Groq) and `GOOGLE_API_KEY` (Google Gemini) in `.env`; optional -- Top 10 AI ranking feature returns 503 if the configured provider's key is missing
+- **AI API credentials**: `GROK_API_KEY` (Groq), `GOOGLE_API_KEY` (Google Gemini), `MISTRAL_API_KEY` (Mistral AI), and `TAVILY_API_KEY` (Tavily search) in `.env`; optional -- Top 10 AI ranking and context search features return 503 if the configured provider's keys are missing
 - **Telegram session management**: Separate sessions recommended for dev and prod to avoid revocation; `generate_session.py` script supports creating labeled sessions ("TGUpdates-Dev" / "TGUpdates-Prod")
 - **Startup logging**: No user or feed data is logged at startup
 - **Service worker**: Does not intercept fetch requests (avoids stripping `Authorization` headers on mobile browsers); versioned with cache-clearing on activation
@@ -742,7 +818,11 @@ telethon           # Telegram API client for channel search and private channel 
   "scroll_speed": 50,
   "media_concurrency": 20,
   "ai_provider": "gemini",
-  "ai_model": "gemini-2.5-flash"
+  "ai_model": "gemini-2.5-flash",
+  "context_provider": "gemini",
+  "context_mistral_model": "mistral-large-latest",
+  "context_tavily_depth": "basic",
+  "context_tavily_max_results": 5
 }
 ```
 
@@ -781,6 +861,9 @@ telethon           # Telegram API client for channel search and private channel 
 - `get_full_config(user)`: `GET /api/admin/config` -- returns config.json (admin-only, 403 for non-admin)
 - `update_config(request, user)`: `POST /api/admin/config` -- updates config.json (admin-only, 403 for non-admin)
 - `get_top_posts(request, user)`: `POST /api/top-posts` -- receives posts array, computes per-post engagement ratio (views/subscribers), sends stripped-down versions to configured AI provider (Google Gemini or Groq, per `ai_provider`/`ai_model` in `config.json`) with system prompt from `top10_prompt.md`, parses response indices, returns top 10 full post objects
+- `get_context_summary(request, user)`: `POST /api/context-summary` -- routes to appropriate context provider based on `context_provider` in `config.json`
+- `_context_summary_gemini(request)`: Generates context using Google Gemini with Google Search grounding; reads `context_summary_prompt.md`, returns summary and sources
+- `_context_summary_mistral(request)`: Generates context using Mistral AI + Tavily; instantiates `WebSearch` class with config parameters, returns summary and sources
 - `normalize_channel(raw: str) -> str`: Extracts channel name from various URL formats
 - `fetch_channel_html(client, channel) -> str | None`: Async HTTP request with error handling
 - `extract_image_url(style: str) -> str | None`: Regex extraction from CSS `url()` values
@@ -792,6 +875,14 @@ telethon           # Telegram API client for channel search and private channel 
 - `get_saved_posts(request, user)`: `GET /api/saved` -- returns the logged-in user's saved posts from Supabase
 - `save_post(request, user)`: `POST /api/saved` -- saves a post for the logged-in user in Supabase (duplicate check)
 - `unsave_post(channel, post_id, request, user)`: `DELETE /api/saved/{channel}/{post_id}` -- removes a saved post for the logged-in user
+
+#### WebSearch (`web_search.py`)
+- `WebSearch.__init__(mistral_api_key, tavily_api_key, mistral_model, search_depth, max_results)`: Initializes the web search client with API keys and configuration
+- `WebSearch.search(post_text) -> dict`: Main orchestration method that generates search terms, searches the web, and summarizes results
+- `WebSearch._generate_search_terms(post_text) -> str`: Uses Mistral AI to extract 2-5 search terms from the post (reads `search_terms.md` prompt)
+- `WebSearch._search_web(search_terms) -> list[dict]`: Searches Tavily API with the generated terms, returns list of results with title, url, content
+- `WebSearch._summarize_results(post_text, web_results) -> str`: Uses Mistral AI to synthesize web results into a contextual summary (reads `summarize.md` prompt)
+- `WebSearch._call_mistral(system_prompt, user_content) -> str`: Generic Mistral API caller with error handling
 
 #### Database (`database.py`)
 - `Database.create() -> Database`: Async factory that initializes the Supabase async client
@@ -851,10 +942,14 @@ telethon           # Telegram API client for channel search and private channel 
 /
 ├── server.py              # FastAPI backend with PWA support, Supabase lifespan, and Telethon integration
 ├── database.py            # Database class encapsulating Supabase async client
-├── config.json            # Global settings (refresh interval, max posts, scroll speed, AI provider/model)
+├── web_search.py          # WebSearch class for Mistral AI + Tavily web search integration
+├── config.json            # Global settings (refresh interval, max posts, scroll speed, AI provider/model, context provider)
 ├── top10_prompt.md        # Editable system prompt for AI Top 10 ranking (with exclusion rules)
+├── context_summary_prompt.md  # System prompt for Gemini context search with Google Search grounding
+├── search_terms.md        # Prompt for Mistral AI to extract search terms from posts
+├── summarize.md           # Prompt for Mistral AI to summarize web search results
 ├── generate_session.py    # Telethon StringSession generator (dev/prod labeled sessions)
-├── .env                   # Environment variables (SUPABASE_URL, SUPABASE_KEY, TELEGRAM_*, GROK_API_KEY, GOOGLE_API_KEY)
+├── .env                   # Environment variables (SUPABASE_URL, SUPABASE_KEY, TELEGRAM_*, GROK_API_KEY, GOOGLE_API_KEY, MISTRAL_API_KEY, TAVILY_API_KEY)
 ├── requirements.txt       # Python dependencies
 ├── static/
 │   ├── index.html         # Complete frontend application with PWA and share system

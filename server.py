@@ -22,8 +22,11 @@ from fastapi.staticfiles import StaticFiles
 from telethon import TelegramClient, functions
 from telethon.sessions import StringSession
 from telethon.tl.types import Channel, Chat, MessageMediaPhoto, MessageMediaDocument, PeerChannel
+from google import genai
+from google.genai import types
 
 from database import Database
+from web_search import WebSearch
 
 load_dotenv()
 
@@ -85,9 +88,11 @@ app = FastAPI(lifespan=lifespan)
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 TOP10_PROMPT_PATH = Path(__file__).parent / "top10_prompt.md"
+CONTEXT_SUMMARY_PROMPT_PATH = Path(__file__).parent / "context_summary_prompt.md"
 GROQ_API_KEY = os.environ.get("GROK_API_KEY", "")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "")
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 AVATAR_CACHE_DIR = Path(__file__).parent / "avatar_cache"
 AVATAR_CACHE_DIR.mkdir(exist_ok=True)
 THUMB_CACHE_DIR = Path(__file__).parent / "thumb_cache"
@@ -620,6 +625,132 @@ async def get_top_posts(request: Request, user: dict = Depends(require_auth)):
         if isinstance(idx, int) and 0 <= idx < len(posts):
             top_posts.append(posts[idx])
     return top_posts[:10]
+
+
+async def _context_summary_gemini(request: Request) -> dict | JSONResponse:
+    """Generate context summary using Gemini with Google Search grounding."""
+    if not GOOGLE_API_KEY:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Context summary not configured (GOOGLE_API_KEY missing)"}
+        )
+    
+    body = await request.json()
+    post_text = body.get("post_text", "").strip()
+    
+    if not post_text:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "post_text is required"}
+        )
+    
+    try:
+        prompt_text = CONTEXT_SUMMARY_PROMPT_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "context_summary_prompt.md not found"}
+        )
+    
+    try:
+        client = genai.Client(api_key=GOOGLE_API_KEY)
+        
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model="gemini-2.5-flash",
+            contents=post_text,
+            config=types.GenerateContentConfig(
+                system_instruction=prompt_text,
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                temperature=0.3,
+            )
+        )
+        
+        summary = response.text
+        
+        sources = []
+        if response.candidates and len(response.candidates) > 0:
+            candidate = response.candidates[0]
+            if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
+                if hasattr(candidate.grounding_metadata, 'grounding_chunks'):
+                    for chunk in candidate.grounding_metadata.grounding_chunks:
+                        if hasattr(chunk, 'web') and chunk.web:
+                            sources.append({
+                                "title": getattr(chunk.web, 'title', ''),
+                                "url": getattr(chunk.web, 'uri', ''),
+                            })
+        
+        return {"summary": summary, "sources": sources}
+        
+    except Exception as e:
+        logger.error("Gemini context summary generation failed: %s", e)
+        return JSONResponse(
+            status_code=502,
+            content={"detail": f"Failed to generate context summary: {str(e)}"}
+        )
+
+
+async def _context_summary_mistral(request: Request) -> dict | JSONResponse:
+    """Generate context summary using Mistral AI + Tavily web search."""
+    if not MISTRAL_API_KEY:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Context summary not configured (MISTRAL_API_KEY missing)"}
+        )
+    if not TAVILY_API_KEY:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Context summary not configured (TAVILY_API_KEY missing)"}
+        )
+    
+    body = await request.json()
+    post_text = body.get("post_text", "").strip()
+    
+    if not post_text:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "post_text is required"}
+        )
+    
+    try:
+        config = load_config()
+        mistral_model = config.get("context_mistral_model", "mistral-large-latest")
+        tavily_depth = config.get("context_tavily_depth", "basic")
+        tavily_max_results = config.get("context_tavily_max_results", 5)
+        
+        web_search = WebSearch(
+            mistral_api_key=MISTRAL_API_KEY,
+            tavily_api_key=TAVILY_API_KEY,
+            mistral_model=mistral_model,
+            search_depth=tavily_depth,
+            max_results=tavily_max_results,
+        )
+        
+        result = await web_search.search(post_text)
+        
+        return {
+            "summary": result["summary"],
+            "sources": result["sources"]
+        }
+        
+    except Exception as e:
+        logger.error("Mistral+Tavily context summary generation failed: %s", e)
+        return JSONResponse(
+            status_code=502,
+            content={"detail": f"Failed to generate context summary: {str(e)}"}
+        )
+
+
+@app.post("/api/context-summary")
+async def get_context_summary(request: Request, user: dict = Depends(require_auth)):
+    """Generate context summary for a post using configured provider (Gemini or Mistral+Tavily)."""
+    config = load_config()
+    context_provider = config.get("context_provider", "gemini")
+    
+    if context_provider == "mistral":
+        return await _context_summary_mistral(request)
+    else:
+        return await _context_summary_gemini(request)
 
 
 @app.get("/api/config", dependencies=[Depends(require_auth)])
