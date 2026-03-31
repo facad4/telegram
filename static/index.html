@@ -2876,9 +2876,7 @@
       setupAutocomplete();
 
       applyAutoHideHeader();
-      await fetchConfig();
-      await loadSavedPostIds();
-      await fetchPosts();
+      await Promise.all([fetchConfig(), loadSavedPostIds(), fetchPosts()]);
       if (refreshTimer) clearInterval(refreshTimer);
       refreshTimer = setInterval(() => {
         if (currentView === 'main') {
