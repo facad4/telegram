@@ -282,6 +282,8 @@
       min-height: calc(50vh - 40px);
       transition: border-color 0.2s;
       flex-shrink: 0;
+      content-visibility: auto;
+      contain-intrinsic-size: auto 50vh;
     }
 
     .post-card:hover { border-color: var(--accent); }
@@ -1670,9 +1672,12 @@
 
     let manualScrollTimer = null;
     let scrollLastTime = null;
+    let scrollSubPixel = 0;
+
+    const viewport = document.getElementById('scrollViewport');
+    const postsContainer = document.getElementById('postsContainer');
 
     function scrollTick(time) {
-      const viewport = document.getElementById('scrollViewport');
       if (!scrollLastTime) scrollLastTime = time;
       const dt = (time - scrollLastTime) / 1000;
       scrollLastTime = time;
@@ -1680,13 +1685,26 @@
       if (!paused && !isScrollingStopped) {
         const maxScroll = viewport.scrollHeight - viewport.clientHeight;
         if (maxScroll > 0) {
-          viewport.scrollTop += scrollSpeed * dt;
+          scrollSubPixel += scrollSpeed * dt;
+          const wholePx = Math.floor(scrollSubPixel);
+          const fraction = scrollSubPixel - wholePx;
+
+          if (wholePx > 0) {
+            viewport.scrollTop += wholePx;
+            scrollSubPixel = fraction;
+          }
+          postsContainer.style.transform = `translateY(-${fraction.toFixed(3)}px)`;
+
           if (viewport.scrollTop >= maxScroll) {
             paused = true;
+            postsContainer.style.transform = '';
+            scrollSubPixel = 0;
             setTimeout(() => {
+              viewport.style.scrollBehavior = 'smooth';
               viewport.scrollTop = 0;
+              viewport.style.scrollBehavior = '';
               scrollLastTime = null;
-              paused = false;
+              setTimeout(() => { paused = false; }, 800);
             }, 3000);
           }
         }
@@ -1696,8 +1714,9 @@
     }
 
     function startScrolling() {
-      const viewport = document.getElementById('scrollViewport');
       viewport.scrollTop = 0;
+      postsContainer.style.transform = '';
+      scrollSubPixel = 0;
 
       if (scrollAnimId) cancelAnimationFrame(scrollAnimId);
 
@@ -1711,15 +1730,17 @@
       scrollAnimId = requestAnimationFrame(scrollTick);
     }
 
-    const viewport = document.getElementById('scrollViewport');
-
     viewport.addEventListener('wheel', () => {
+      postsContainer.style.transform = '';
+      scrollSubPixel = 0;
       paused = true;
       clearTimeout(manualScrollTimer);
       manualScrollTimer = setTimeout(() => { paused = false; }, 4000);
     }, { passive: true });
 
     viewport.addEventListener('touchstart', () => {
+      postsContainer.style.transform = '';
+      scrollSubPixel = 0;
       paused = true;
       clearTimeout(manualScrollTimer);
     }, { passive: true });
