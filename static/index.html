@@ -1487,8 +1487,12 @@
           <input type="number" id="refreshInterval" min="1" max="60">
         </div>
         <div class="setting-item">
-          <label>Max Posts</label>
+          <label>Max Posts to Display</label>
           <input type="number" id="maxPosts" min="5" max="100">
+        </div>
+        <div class="setting-item">
+          <label>Fetch per Channel</label>
+          <input type="number" id="fetchPerChannel" min="5" max="100">
         </div>
         <div class="setting-item">
           <label>Scroll Speed</label>
@@ -2368,7 +2372,8 @@
           const resp = await authFetch('/api/admin/config');
           const config = await resp.json();
           document.getElementById('refreshInterval').value = config.refresh_interval_minutes || 5;
-          document.getElementById('maxPosts').value = config.max_posts || 20;
+          document.getElementById('maxPosts').value = config.max_posts || 100;
+          document.getElementById('fetchPerChannel').value = config.fetch_per_channel || 50;
           document.getElementById('scrollSpeed').value = config.scroll_speed || 50;
           document.getElementById('mediaConcurrency').value = config.media_concurrency || 5;
           const provider = config.ai_provider || 'gemini';
@@ -2743,6 +2748,7 @@
       const config = {
         refresh_interval_minutes: parseInt(document.getElementById('refreshInterval').value),
         max_posts: parseInt(document.getElementById('maxPosts').value),
+        fetch_per_channel: parseInt(document.getElementById('fetchPerChannel').value),
         scroll_speed: parseInt(document.getElementById('scrollSpeed').value),
         media_concurrency: parseInt(document.getElementById('mediaConcurrency').value),
         ai_provider: document.getElementById('aiProvider').value,

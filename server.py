@@ -492,7 +492,8 @@ async def get_posts(request: Request, user: dict = Depends(require_auth)):
     db: Database = request.app.state.db
     feeds = await db.get_feeds_for_user(user["user_id"])
     config = load_config()
-    max_posts = config.get("max_posts", 20)
+    max_posts = config.get("max_posts", 100)
+    fetch_limit = config.get("fetch_per_channel", 50)
 
     public_feeds = [f for f in feeds if not f.get("is_private") and f.get("feed_url")]
     private_feeds = [f for f in feeds if f.get("is_private") and f.get("feed_url")]
@@ -505,9 +506,9 @@ async def get_posts(request: Request, user: dict = Depends(require_auth)):
         telethon_tasks = []
         for f in public_feeds:
             username = normalize_channel(f["feed_url"])
-            telethon_tasks.append(fetch_channel_posts_telethon(tg, username, limit=max_posts, media_sem=media_sem))
+            telethon_tasks.append(fetch_channel_posts_telethon(tg, username, limit=fetch_limit, media_sem=media_sem))
         for f in private_feeds:
-            telethon_tasks.append(fetch_channel_posts_telethon(tg, PeerChannel(int(f["feed_url"])), limit=max_posts, media_sem=media_sem))
+            telethon_tasks.append(fetch_channel_posts_telethon(tg, PeerChannel(int(f["feed_url"])), limit=fetch_limit, media_sem=media_sem))
         if telethon_tasks:
             results = await asyncio.gather(*telethon_tasks)
             for posts in results:
