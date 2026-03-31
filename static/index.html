@@ -1975,7 +1975,7 @@
         const mediaSrc = post.photo_url || post.video_thumb;
         let mediaSideHtml;
         if (mediaSrc) {
-          mediaSideHtml = `<div class="post-media-side"><img src="${mediaSrc}" alt="" loading="lazy"></div>`;
+          mediaSideHtml = `<div class="post-media-side"><img src="${mediaSrc}" alt="" loading="lazy" onerror="this.parentElement.style.display='none'"></div>`;
         } else {
           mediaSideHtml = '';
         }

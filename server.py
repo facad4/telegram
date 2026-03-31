@@ -99,6 +99,17 @@ THUMB_CACHE_DIR = Path(__file__).parent / "thumb_cache"
 THUMB_CACHE_DIR.mkdir(exist_ok=True)
 AVATAR_TTL_SECONDS = 1_209_600  # 2 weeks
 THUMB_TTL_SECONDS = 1_209_600   # 2 weeks
+PENDING_THUMBS_TTL = 600        # 10 minutes
+
+_pending_thumbs: dict[str, tuple[float, object]] = {}
+
+
+def _cleanup_pending_thumbs():
+    """Remove stashed media refs older than PENDING_THUMBS_TTL."""
+    cutoff = time.time() - PENDING_THUMBS_TTL
+    stale = [k for k, (ts, _) in _pending_thumbs.items() if ts < cutoff]
+    for k in stale:
+        del _pending_thumbs[k]
 
 
 def load_config() -> dict:
@@ -368,15 +379,10 @@ async def fetch_channel_posts_telethon(
             real_id = getattr(entity, "id", channel_ref)
             channel_name = str(real_id)
 
-        download_tasks = [
-            _download_thumb(tg, msg.media, media_sem, f"{channel_name}_{msg.id}")
-            if isinstance(msg.media, MessageMediaPhoto) else asyncio.sleep(0, result=None)
-            for msg in filtered
-        ]
-        photo_results = await asyncio.gather(*download_tasks)
+        _cleanup_pending_thumbs()
 
         raw_posts = []
-        for msg, photo_url in zip(filtered, photo_results):
+        for msg in filtered:
             text_plain = msg.text or ""
             text_html = f"<div>{text_plain.replace(chr(10), '<br>')}</div>" if text_plain else ""
             views = str(msg.views) if msg.views else ""
@@ -386,6 +392,16 @@ async def fetch_channel_posts_telethon(
                 post_url = f"https://t.me/{username}/{msg.id}"
             else:
                 post_url = f"https://t.me/c/{real_id}/{msg.id}"
+
+            photo_url = None
+            if isinstance(msg.media, MessageMediaPhoto):
+                thumb_key = f"{channel_name}_{msg.id}"
+                cache_path = THUMB_CACHE_DIR / f"{thumb_key}.jpg"
+                if cache_path.exists() and (time.time() - cache_path.stat().st_mtime) < THUMB_TTL_SECONDS:
+                    photo_url = f"/api/thumb/{thumb_key}"
+                else:
+                    _pending_thumbs[thumb_key] = (time.time(), msg.media)
+                    photo_url = f"/api/thumb/{thumb_key}"
 
             raw_posts.append({
                 "channel": channel_name,
@@ -421,12 +437,29 @@ async def get_avatar(channel_key: str):
 
 
 @app.get("/api/thumb/{thumb_key}")
-async def get_thumb(thumb_key: str):
+async def get_thumb(thumb_key: str, request: Request):
     path = THUMB_CACHE_DIR / f"{thumb_key}.jpg"
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Thumbnail not found")
-    return FileResponse(path, media_type="image/jpeg",
-                        headers={"Cache-Control": "public, max-age=604800"})
+    if path.exists():
+        return FileResponse(path, media_type="image/jpeg",
+                            headers={"Cache-Control": "public, max-age=604800"})
+
+    entry = _pending_thumbs.pop(thumb_key, None)
+    tg: TelegramClient | None = request.app.state.telegram
+    if entry and tg:
+        _, media = entry
+        try:
+            buf = io.BytesIO()
+            await tg.download_media(media, file=buf, thumb=-1)
+            buf.seek(0)
+            data = buf.read()
+            if data:
+                path.write_bytes(data)
+                return FileResponse(path, media_type="image/jpeg",
+                                    headers={"Cache-Control": "public, max-age=604800"})
+        except Exception:
+            logger.debug("On-demand thumb download failed for %s", thumb_key)
+
+    raise HTTPException(status_code=404, detail="Thumbnail not found")
 
 
 @app.post("/api/login")
