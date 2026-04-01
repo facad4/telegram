@@ -974,6 +974,32 @@
       background: #FBFAF4;
     }
 
+    .post-video-embed:fullscreen.is-portrait-video,
+    .post-video-embed:-webkit-full-screen.is-portrait-video {
+      flex-direction: column;
+    }
+
+    .post-video-embed:fullscreen.is-portrait-video .video-controls,
+    .post-video-embed:-webkit-full-screen.is-portrait-video .video-controls {
+      flex-direction: row;
+      width: 100%;
+      border-left: none;
+      border-top: 1px solid rgba(255,255,255,0.1);
+      padding: 8px;
+      gap: 8px;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .post-video-embed:fullscreen.is-portrait-video .video-progress,
+    .post-video-embed:-webkit-full-screen.is-portrait-video .video-progress {
+      width: auto;
+      min-width: 120px;
+      max-width: none;
+      flex: 1;
+      order: 0;
+    }
+
     /* Explicit Feed (Non-Fullscreen) Styling */
     .post-video-embed:not(:fullscreen):not(:-webkit-full-screen) {
       background: var(--media-bg);
@@ -2277,16 +2303,24 @@
     }
 
     let videoObserver;
+    let lastFullscreenContainer = null;
     function observeVideos() {
       if (videoObserver) videoObserver.disconnect();
       const viewport = document.getElementById('scrollViewport');
       videoObserver = new IntersectionObserver((entries) => {
         entries.forEach(entry => {
           const video = entry.target;
+          const container = video.closest('.post-video-embed');
+          const fullscreenElement = getFullscreenElement();
+          const isFullscreenVideo = fullscreenElement === container || fullscreenElement === video;
+          if (isFullscreenVideo) return;
           if (!entry.isIntersecting && !video.paused) {
             video.pause();
-            const btn = video.closest('.post-video-embed')?.querySelector('.video-play-btn');
-            if (btn) btn.innerHTML = '<svg viewBox="0 0 24 24"><polygon points="6,4 20,12 6,20"/></svg>';
+            const btn = container?.querySelector('.video-play-btn');
+            if (btn) {
+              btn.innerHTML = '<svg viewBox="0 0 24 24"><polygon points="6,4 20,12 6,20"/></svg>';
+              btn.title = 'Play';
+            }
           }
         });
       }, { root: viewport, threshold: 0.1 });
@@ -2295,8 +2329,32 @@
       
       document.querySelectorAll('.post-video-embed').forEach(container => {
         updateFullscreenButton(container);
+        bindVideoAspect(container);
         bindVideoProgress(container);
       });
+    }
+
+    function bindVideoAspect(container) {
+      const video = container?.querySelector('.post-video');
+      if (!video || video.dataset.aspectBound === 'true') return;
+
+      const updateAspect = () => {
+        const parent = video.closest('.post-video-embed');
+        if (!parent) return;
+        const w = video.videoWidth || 0;
+        const h = video.videoHeight || 0;
+        if (!w || !h) return;
+        const isPortrait = h > w;
+        parent.classList.toggle('is-portrait-video', isPortrait);
+        if (getFullscreenElement() === parent) {
+          void updateFullscreenOrientationMode(parent);
+        }
+      };
+
+      video.addEventListener('loadedmetadata', updateAspect);
+      video.addEventListener('loadeddata', updateAspect);
+      video.dataset.aspectBound = 'true';
+      updateAspect();
     }
 
     function bindVideoProgress(container) {
@@ -2334,43 +2392,96 @@
       video.currentTime = (Number(input.value) / 100) * video.duration;
     }
 
-    document.addEventListener('fullscreenchange', () => {
-      const container = document.fullscreenElement;
-      if (container && container.classList.contains('post-video-embed')) {
-        updateFullscreenButton(container);
-        
-        const wasPlaying = container.dataset.wasPlaying === 'true';
-        if (wasPlaying) {
-          const video = container.querySelector('.post-video');
-          if (video) {
-            setTimeout(() => {
-              video.play().catch(() => {});
-            }, 150);
-          }
-        }
-      } else {
-        document.querySelectorAll('.post-video-embed').forEach(c => updateFullscreenButton(c));
-      }
-    });
+    function getFullscreenElement() {
+      return document.fullscreenElement || document.webkitFullscreenElement || null;
+    }
 
-    document.addEventListener('webkitfullscreenchange', () => {
-      const container = document.webkitFullscreenElement;
-      if (container && container.classList.contains('post-video-embed')) {
-        updateFullscreenButton(container);
-        
-        const wasPlaying = container.dataset.wasPlaying === 'true';
-        if (wasPlaying) {
-          const video = container.querySelector('.post-video');
-          if (video) {
-            setTimeout(() => {
-              video.play().catch(() => {});
-            }, 150);
-          }
-        }
-      } else {
-        document.querySelectorAll('.post-video-embed').forEach(c => updateFullscreenButton(c));
+    async function requestLandscapeOrientationLock() {
+      const orientation = screen?.orientation;
+      if (!orientation || typeof orientation.lock !== 'function') return;
+      try {
+        await orientation.lock('landscape');
+      } catch (_) {
+        // Best-effort only: many mobile browsers reject orientation lock.
       }
-    });
+    }
+
+    function unlockOrientationIfSupported() {
+      const orientation = screen?.orientation;
+      if (!orientation || typeof orientation.unlock !== 'function') return;
+      try {
+        orientation.unlock();
+      } catch (_) {
+        // Ignore unlock failures for unsupported browsers.
+      }
+    }
+
+    function isPortraitVideoContainer(container) {
+      if (!container) return false;
+      const video = container.querySelector('.post-video');
+      if (!video) return false;
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        return video.videoHeight > video.videoWidth;
+      }
+      return container.classList.contains('is-portrait-video');
+    }
+
+    async function updateFullscreenOrientationMode(container) {
+      if (!container || getFullscreenElement() !== container) return;
+      if (isPortraitVideoContainer(container)) {
+        unlockOrientationIfSupported();
+        return;
+      }
+      await requestLandscapeOrientationLock();
+    }
+
+    async function resumeVideoIfNeeded(container) {
+      if (!container || container.dataset.wasPlaying !== 'true') return;
+      const video = container.querySelector('.post-video');
+      if (!video) return;
+
+      for (let attempt = 0; attempt < 6; attempt++) {
+        try {
+          await video.play();
+          if (!video.paused) {
+            delete container.dataset.wasPlaying;
+            return;
+          }
+        } catch (_) {
+          // Continue retrying; mobile fullscreen transitions can be delayed.
+        }
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+      delete container.dataset.wasPlaying;
+    }
+
+    function handleFullscreenChange() {
+      const container = getFullscreenElement();
+
+      if (container && container.classList.contains('post-video-embed')) {
+        lastFullscreenContainer = container;
+        updateFullscreenButton(container);
+        bindVideoAspect(container);
+        void updateFullscreenOrientationMode(container);
+        void resumeVideoIfNeeded(container);
+        return;
+      }
+
+      unlockOrientationIfSupported();
+      if (lastFullscreenContainer) {
+        lastFullscreenContainer.classList.remove('is-portrait-video');
+        updateFullscreenButton(lastFullscreenContainer);
+        void resumeVideoIfNeeded(lastFullscreenContainer);
+      }
+      document.querySelectorAll('.post-video-embed').forEach(c => {
+        c.classList.remove('is-portrait-video');
+        updateFullscreenButton(c);
+      });
+      lastFullscreenContainer = null;
+    }
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
 
     async function toggleVideoPlay(btn) {
       const video = btn.closest('.post-video-embed')?.querySelector('.post-video');
@@ -2429,7 +2540,31 @@
       }
     }
 
-    function toggleVideoFullscreen(btn) {
+    async function requestElementFullscreen(element) {
+      if (element.requestFullscreen) {
+        await element.requestFullscreen();
+        return;
+      }
+      if (element.webkitRequestFullscreen) {
+        element.webkitRequestFullscreen();
+        return;
+      }
+      throw new Error('Fullscreen API not supported');
+    }
+
+    async function exitAnyFullscreen() {
+      if (document.exitFullscreen) {
+        await document.exitFullscreen();
+        return;
+      }
+      if (document.webkitExitFullscreen) {
+        document.webkitExitFullscreen();
+        return;
+      }
+      throw new Error('Exit Fullscreen API not supported');
+    }
+
+    async function toggleVideoFullscreen(btn) {
       const container = btn.closest('.post-video-embed');
       if (!container) return;
 
@@ -2438,18 +2573,20 @@
       
       container.dataset.wasPlaying = wasPlaying ? 'true' : 'false';
 
-      if (!document.fullscreenElement && !document.webkitFullscreenElement) {
-        if (container.requestFullscreen) {
-          container.requestFullscreen().catch(e => console.error('Fullscreen request failed:', e));
-        } else if (container.webkitRequestFullscreen) {
-          container.webkitRequestFullscreen();
+      const fullscreenElement = getFullscreenElement();
+      try {
+        if (!fullscreenElement) {
+          bindVideoAspect(container);
+          await requestElementFullscreen(container);
+          void updateFullscreenOrientationMode(container);
+          void resumeVideoIfNeeded(container);
+        } else {
+          await exitAnyFullscreen();
         }
-      } else {
-        if (document.exitFullscreen) {
-          document.exitFullscreen().catch(e => console.error('Exit fullscreen failed:', e));
-        } else if (document.webkitExitFullscreen) {
-          document.webkitExitFullscreen();
-        }
+      } catch (e) {
+        delete container.dataset.wasPlaying;
+        updateFullscreenButton(container);
+        console.error('Fullscreen toggle failed:', e);
       }
     }
 
