@@ -299,11 +299,123 @@
       justify-content: center;
     }
 
+    .post-card:not(.has-video) .post-media-side {
+      width: var(--image-media-width, 52%);
+      max-width: 700px;
+      aspect-ratio: var(--image-aspect-ratio, 4 / 3);
+      max-height: 70vh;
+      min-height: 220px;
+    }
+
     .post-media-side img {
       width: 100%;
       height: 100%;
-      object-fit: cover;
+      object-fit: contain;
       display: block;
+      background: var(--media-bg);
+    }
+
+    .post-card.has-video {
+      flex-direction: column;
+    }
+
+    .post-media-side.post-video-embed {
+      position: relative;
+      width: 100%;
+      max-width: none;
+      overflow: hidden;
+      background: #000;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .post-video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+      background: #000;
+    }
+
+    .video-controls {
+      display: flex;
+      gap: 8px;
+      padding: 8px;
+      background: var(--card-bg);
+      justify-content: center;
+      align-items: center;
+      border-top: 1px solid var(--border);
+    }
+
+    .video-controls button {
+      width: 36px;
+      height: 36px;
+      border: none;
+      border-radius: 50%;
+      background: rgba(0,0,0,0.08);
+      color: var(--text);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      transition: background 0.2s;
+    }
+
+    .video-controls button:hover {
+      background: rgba(0,0,0,0.12);
+    }
+
+    .video-controls button:active {
+      background: rgba(0,0,0,0.18);
+    }
+
+    .video-controls button svg {
+      width: 18px;
+      height: 18px;
+      fill: var(--text);
+    }
+
+    .video-progress {
+      flex: 1;
+      min-width: 110px;
+      max-width: 240px;
+      height: 22px;
+      background: transparent;
+      -webkit-appearance: none;
+      appearance: none;
+      cursor: pointer;
+    }
+
+    .video-progress::-webkit-slider-runnable-track {
+      height: 4px;
+      background: rgba(0,0,0,0.2);
+      border-radius: 999px;
+    }
+
+    .video-progress::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 12px;
+      height: 12px;
+      margin-top: -4px;
+      border-radius: 50%;
+      border: none;
+      background: var(--accent);
+    }
+
+    .video-progress::-moz-range-track {
+      height: 4px;
+      background: rgba(0,0,0,0.2);
+      border-radius: 999px;
+    }
+
+    .video-progress::-moz-range-thumb {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      border: none;
+      background: var(--accent);
     }
 
     .post-media-side.empty {
@@ -552,8 +664,19 @@
       .post-media-side {
         width: 100%;
         max-width: none;
-        height: 200px;
+        height: auto;
         flex-shrink: 0;
+      }
+
+      .post-card:not(.has-video) .post-media-side {
+        width: 100%;
+        max-width: none;
+        max-height: 70vh;
+        min-height: 220px;
+      }
+
+      .post-media-side.post-video-embed {
+        height: auto;
       }
 
       .post-media-side.empty {
@@ -743,6 +866,136 @@
       .autocomplete-item-members {
         font-size: 0.82rem;
       }
+    }
+
+    /* Mobile Landscape Mode - Position controls vertically on right side */
+    @media (max-width: 768px) and (orientation: landscape) {
+      .post-video-embed {
+        flex-direction: row;
+      }
+
+      .video-controls {
+        flex-direction: column;
+        padding: 8px 6px;
+        gap: 8px;
+        justify-content: center;
+      }
+
+      .video-progress {
+        width: 84px;
+        min-width: 84px;
+        max-width: 84px;
+        order: -1;
+      }
+
+      .post-video {
+        flex: 1;
+      }
+    }
+
+    /* Fullscreen Mode Styles */
+    .post-video-embed:fullscreen,
+    .post-video-embed:-webkit-full-screen {
+      display: flex;
+      flex-direction: row;
+      width: 100vw;
+      height: 100vh;
+      background: #000;
+    }
+
+    .post-video-embed:fullscreen .post-video,
+    .post-video-embed:-webkit-full-screen .post-video {
+      flex: 1;
+      width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+    }
+
+    .post-video-embed:fullscreen .video-controls,
+    .post-video-embed:-webkit-full-screen .video-controls {
+      flex-direction: column;
+      background: rgba(0,0,0,0.9);
+      border-left: 1px solid rgba(255,255,255,0.1);
+      border-top: none;
+      z-index: 2147483647;
+      position: relative;
+      flex-shrink: 0;
+      padding: 8px 6px;
+      gap: 8px;
+      justify-content: center;
+    }
+
+    .post-video-embed:fullscreen .video-progress,
+    .post-video-embed:-webkit-full-screen .video-progress {
+      width: 84px;
+      min-width: 84px;
+      max-width: 84px;
+      order: -1;
+    }
+
+    .post-video-embed:fullscreen .video-controls button,
+    .post-video-embed:-webkit-full-screen .video-controls button {
+      background: rgba(255,255,255,0.15);
+      color: #fff;
+    }
+
+    .post-video-embed:fullscreen .video-controls button:hover,
+    .post-video-embed:-webkit-full-screen .video-controls button:hover {
+      background: rgba(255,255,255,0.25);
+    }
+
+    .post-video-embed:fullscreen .video-controls button:active,
+    .post-video-embed:-webkit-full-screen .video-controls button:active {
+      background: rgba(255,255,255,0.35);
+    }
+
+    .post-video-embed:fullscreen .video-controls button svg,
+    .post-video-embed:-webkit-full-screen .video-controls button svg {
+      fill: #fff;
+    }
+
+    .post-video-embed:fullscreen .video-progress::-webkit-slider-runnable-track,
+    .post-video-embed:-webkit-full-screen .video-progress::-webkit-slider-runnable-track {
+      background: rgba(255,255,255,0.35);
+    }
+
+    .post-video-embed:fullscreen .video-progress::-webkit-slider-thumb,
+    .post-video-embed:-webkit-full-screen .video-progress::-webkit-slider-thumb {
+      background: #FBFAF4;
+    }
+
+    .post-video-embed:fullscreen .video-progress::-moz-range-track,
+    .post-video-embed:-webkit-full-screen .video-progress::-moz-range-track {
+      background: rgba(255,255,255,0.35);
+    }
+
+    .post-video-embed:fullscreen .video-progress::-moz-range-thumb,
+    .post-video-embed:-webkit-full-screen .video-progress::-moz-range-thumb {
+      background: #FBFAF4;
+    }
+
+    /* Explicit Feed (Non-Fullscreen) Styling */
+    .post-video-embed:not(:fullscreen):not(:-webkit-full-screen) {
+      background: var(--media-bg);
+    }
+
+    .post-video-embed:not(:fullscreen):not(:-webkit-full-screen) .post-video {
+      background: var(--media-bg);
+    }
+
+    .post-video-embed:not(:fullscreen):not(:-webkit-full-screen) .video-controls {
+      background: #F1EFE8;
+      border-top: 1px solid var(--border);
+      box-shadow: inset 0 1px 0 rgba(0,0,0,0.06);
+    }
+
+    .post-video-embed:not(:fullscreen):not(:-webkit-full-screen) .video-controls button {
+      background: rgba(0,0,0,0.08);
+      color: var(--text);
+    }
+
+    .post-video-embed:not(:fullscreen):not(:-webkit-full-screen) .video-controls button svg {
+      fill: var(--text);
     }
 
     /* Management Interface Styles */
@@ -1371,6 +1624,48 @@
     }
 
     .app-container.hidden { display: none; }
+
+    .image-lightbox {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.92);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 30000;
+      padding: 16px;
+    }
+
+    .image-lightbox.open {
+      display: flex;
+    }
+
+    .image-lightbox img {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      border-radius: 8px;
+      box-shadow: 0 14px 40px rgba(0,0,0,0.45);
+    }
+
+    .image-lightbox-close {
+      position: absolute;
+      top: 14px;
+      right: 14px;
+      width: 36px;
+      height: 36px;
+      border: none;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.2);
+      color: #fff;
+      font-size: 24px;
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    body.image-lightbox-open {
+      overflow: hidden;
+    }
   </style>
 </head>
 <body>
@@ -1558,6 +1853,11 @@
     </div>
   </div>
   </div><!-- end appContainer -->
+
+  <div id="imageLightbox" class="image-lightbox" onclick="closeImageFullscreen(event)">
+    <button class="image-lightbox-close" type="button" onclick="closeImageFullscreen(event)" aria-label="Close image">×</button>
+    <img id="imageLightboxImg" src="" alt="">
+  </div>
 
   <script>
     function applyThemeMeta(theme) {
@@ -1976,6 +2276,243 @@
       showSharePopup(postUrl, btn);
     }
 
+    let videoObserver;
+    function observeVideos() {
+      if (videoObserver) videoObserver.disconnect();
+      const viewport = document.getElementById('scrollViewport');
+      videoObserver = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+          const video = entry.target;
+          if (!entry.isIntersecting && !video.paused) {
+            video.pause();
+            const btn = video.closest('.post-video-embed')?.querySelector('.video-play-btn');
+            if (btn) btn.innerHTML = '<svg viewBox="0 0 24 24"><polygon points="6,4 20,12 6,20"/></svg>';
+          }
+        });
+      }, { root: viewport, threshold: 0.1 });
+
+      document.querySelectorAll('.post-video').forEach(v => videoObserver.observe(v));
+      
+      document.querySelectorAll('.post-video-embed').forEach(container => {
+        updateFullscreenButton(container);
+        bindVideoProgress(container);
+      });
+    }
+
+    function bindVideoProgress(container) {
+      const video = container?.querySelector('.post-video');
+      const progress = container?.querySelector('.video-progress');
+      if (!video || !progress || video.dataset.progressBound === 'true') return;
+
+      const updateProgress = () => {
+        if (!Number.isFinite(video.duration) || video.duration <= 0) {
+          progress.value = 0;
+          return;
+        }
+        progress.value = (video.currentTime / video.duration) * 100;
+      };
+
+      video.addEventListener('timeupdate', updateProgress);
+      video.addEventListener('loadedmetadata', updateProgress);
+      video.addEventListener('durationchange', updateProgress);
+      video.addEventListener('ended', () => {
+        const btn = container.querySelector('.video-play-btn');
+        if (btn) {
+          btn.innerHTML = '<svg viewBox="0 0 24 24"><polygon points="6,4 20,12 6,20"/></svg>';
+          btn.title = 'Play';
+        }
+        updateProgress();
+      });
+
+      video.dataset.progressBound = 'true';
+    }
+
+    function seekVideoProgress(input) {
+      const container = input.closest('.post-video-embed');
+      const video = container?.querySelector('.post-video');
+      if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return;
+      video.currentTime = (Number(input.value) / 100) * video.duration;
+    }
+
+    document.addEventListener('fullscreenchange', () => {
+      const container = document.fullscreenElement;
+      if (container && container.classList.contains('post-video-embed')) {
+        updateFullscreenButton(container);
+        
+        const wasPlaying = container.dataset.wasPlaying === 'true';
+        if (wasPlaying) {
+          const video = container.querySelector('.post-video');
+          if (video) {
+            setTimeout(() => {
+              video.play().catch(() => {});
+            }, 150);
+          }
+        }
+      } else {
+        document.querySelectorAll('.post-video-embed').forEach(c => updateFullscreenButton(c));
+      }
+    });
+
+    document.addEventListener('webkitfullscreenchange', () => {
+      const container = document.webkitFullscreenElement;
+      if (container && container.classList.contains('post-video-embed')) {
+        updateFullscreenButton(container);
+        
+        const wasPlaying = container.dataset.wasPlaying === 'true';
+        if (wasPlaying) {
+          const video = container.querySelector('.post-video');
+          if (video) {
+            setTimeout(() => {
+              video.play().catch(() => {});
+            }, 150);
+          }
+        }
+      } else {
+        document.querySelectorAll('.post-video-embed').forEach(c => updateFullscreenButton(c));
+      }
+    });
+
+    async function toggleVideoPlay(btn) {
+      const video = btn.closest('.post-video-embed')?.querySelector('.post-video');
+      if (!video) return;
+      
+      if (!video.src) {
+        const channel = video.dataset.channel;
+        const messageId = video.dataset.messageId;
+        
+        if (!channel || !messageId) return;
+        
+        btn.disabled = true;
+        const originalHtml = btn.innerHTML;
+        btn.innerHTML = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2" opacity="0.5"/></svg>';
+        
+        try {
+          const response = await fetch(`/api/video/cdn/${channel}/${messageId}`);
+          const data = await response.json();
+          
+          if (data.cdn_url) {
+            video.src = data.cdn_url;
+            await video.play();
+            btn.innerHTML = '<svg viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+            btn.title = 'Pause';
+          }
+        } catch (e) {
+          console.error('Failed to load video:', e);
+          btn.innerHTML = originalHtml;
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
+      
+      if (video.paused) {
+        video.play().catch(() => {});
+        btn.innerHTML = '<svg viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+        btn.title = 'Pause';
+      } else {
+        video.pause();
+        btn.innerHTML = '<svg viewBox="0 0 24 24"><polygon points="6,4 20,12 6,20"/></svg>';
+        btn.title = 'Play';
+      }
+    }
+
+    function toggleVideoMute(btn) {
+      const video = btn.closest('.post-video-embed')?.querySelector('.post-video');
+      if (!video) return;
+      video.muted = !video.muted;
+      if (video.muted) {
+        btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>';
+        btn.title = 'Unmute';
+      } else {
+        btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>';
+        btn.title = 'Mute';
+      }
+    }
+
+    function toggleVideoFullscreen(btn) {
+      const container = btn.closest('.post-video-embed');
+      if (!container) return;
+
+      const video = container.querySelector('.post-video');
+      const wasPlaying = video && !video.paused;
+      
+      container.dataset.wasPlaying = wasPlaying ? 'true' : 'false';
+
+      if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+        if (container.requestFullscreen) {
+          container.requestFullscreen().catch(e => console.error('Fullscreen request failed:', e));
+        } else if (container.webkitRequestFullscreen) {
+          container.webkitRequestFullscreen();
+        }
+      } else {
+        if (document.exitFullscreen) {
+          document.exitFullscreen().catch(e => console.error('Exit fullscreen failed:', e));
+        } else if (document.webkitExitFullscreen) {
+          document.webkitExitFullscreen();
+        }
+      }
+    }
+
+    function openImageFullscreen(src, alt = '') {
+      const lightbox = document.getElementById('imageLightbox');
+      const img = document.getElementById('imageLightboxImg');
+      if (!lightbox || !img || !src) return;
+      img.src = src;
+      img.alt = alt || '';
+      lightbox.classList.add('open');
+      document.body.classList.add('image-lightbox-open');
+    }
+
+    function applyDynamicImageSizing(imgEl) {
+      if (!imgEl) return;
+      const wrapper = imgEl.closest('.post-media-side');
+      const card = imgEl.closest('.post-card');
+      if (!wrapper || !card || card.classList.contains('has-video')) return;
+
+      const w = imgEl.naturalWidth || 0;
+      const h = imgEl.naturalHeight || 0;
+      if (!w || !h) return;
+
+      const ratio = w / h;
+      const safeRatio = Math.min(2.2, Math.max(0.45, ratio));
+      const widthPercent = Math.max(42, Math.min(72, 42 + (safeRatio - 0.45) * 18));
+
+      wrapper.style.setProperty('--image-aspect-ratio', `${w} / ${h}`);
+      wrapper.style.setProperty('--image-media-width', `${widthPercent.toFixed(1)}%`);
+    }
+
+    function closeImageFullscreen(evt) {
+      const lightbox = document.getElementById('imageLightbox');
+      const img = document.getElementById('imageLightboxImg');
+      if (!lightbox || !img) return;
+      if (evt && evt.target && evt.target !== lightbox && !evt.target.classList.contains('image-lightbox-close')) {
+        return;
+      }
+      lightbox.classList.remove('open');
+      img.src = '';
+      document.body.classList.remove('image-lightbox-open');
+    }
+
+    document.addEventListener('keydown', (evt) => {
+      if (evt.key === 'Escape') {
+        closeImageFullscreen();
+      }
+    });
+
+    function updateFullscreenButton(container) {
+      const btn = container?.querySelector('.video-fullscreen-btn');
+      if (!btn) return;
+      
+      const isFullscreen = document.fullscreenElement === container || document.webkitFullscreenElement === container;
+      if (isFullscreen) {
+        btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>';
+        btn.title = 'Exit Fullscreen';
+      } else {
+        btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>';
+        btn.title = 'Fullscreen';
+      }
+    }
+
     function renderPosts() {
       const container = document.getElementById('postsContainer');
       let filtered = activeFilter ? allPosts.filter(p => p.channel === activeFilter) : [...allPosts];
@@ -1998,9 +2535,35 @@
           : `<div class="post-avatar-placeholder">${(post.channel_title || post.channel)[0].toUpperCase()}</div>`;
 
         const mediaSrc = post.photo_url || post.video_thumb;
+        const imageAlt = (post.channel_title || post.channel || '').slice(0, 120);
+        const escapedMediaSrc = (mediaSrc || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const escapedImageAlt = imageAlt.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
         let mediaSideHtml;
-        if (mediaSrc) {
-          mediaSideHtml = `<div class="post-media-side"><img src="${mediaSrc}" alt="" loading="lazy" onerror="this.parentElement.style.display='none'"></div>`;
+        const isPublicChannel = post.channel && !/^\d+$/.test(post.channel);
+        if (post.has_video && isPublicChannel) {
+          const poster = post.video_thumb || post.photo_url || '';
+          mediaSideHtml = `<div class="post-media-side post-video-embed" onclick="event.stopPropagation()">
+            <video class="post-video"
+              data-channel="${post.channel}"
+              data-message-id="${post.post_id}"
+              ${poster ? `poster="${poster}"` : ''}
+              playsinline loop preload="none">
+            </video>
+            <div class="video-controls">
+              <input class="video-progress" type="range" min="0" max="100" value="0" step="0.1" oninput="seekVideoProgress(this)" onclick="event.stopPropagation()">
+              <button class="video-play-btn" onclick="toggleVideoPlay(this)" title="Play">
+                <svg viewBox="0 0 24 24"><polygon points="6,4 20,12 6,20"/></svg>
+              </button>
+              <button class="video-mute-btn" onclick="toggleVideoMute(this)" title="Mute">
+                <svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+              </button>
+              <button class="video-fullscreen-btn" onclick="toggleVideoFullscreen(this)" title="Fullscreen">
+                <svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+              </button>
+            </div>
+          </div>`;
+        } else if (mediaSrc) {
+          mediaSideHtml = `<div class="post-media-side"><img src="${mediaSrc}" alt="" loading="lazy" onload="applyDynamicImageSizing(this)" onclick="event.stopPropagation(); openImageFullscreen('${escapedMediaSrc}', '${escapedImageAlt}')" onerror="this.parentElement.style.display='none'"></div>`;
         } else {
           mediaSideHtml = '';
         }
@@ -2022,8 +2585,9 @@
         const bookmarkOutline = `<svg viewBox="0 0 24 24"><path d="M17 3H7c-1.1 0-2 .9-2 2v16l7-3 7 3V5c0-1.1-.9-2-2-2zm0 15l-5-2.18L7 18V5h10v13z"/></svg>`;
         const bookmarkFilled = `<svg viewBox="0 0 24 24"><path d="M17 3H7c-1.1 0-2 .9-2 2v16l7-3 7 3V5c0-1.1-.9-2-2-2z"/></svg>`;
 
+        const videoClass = (post.has_video && isPublicChannel) ? ' has-video' : '';
         return `
-          <div class="post-card" onclick="window.open('${post.post_url}','_blank')">
+          <div class="post-card${videoClass}" onclick="window.open('${post.post_url}','_blank')">
             ${mediaSideHtml}
             <div class="post-content">
               <div class="post-header">
@@ -2060,6 +2624,7 @@
       }).join('');
 
       startScrolling();
+      observeVideos();
     }
 
     // Navigation functions

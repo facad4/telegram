@@ -17,11 +17,11 @@ import jwt
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from telethon import TelegramClient, functions
 from telethon.sessions import StringSession
-from telethon.tl.types import Channel, Chat, MessageMediaPhoto, MessageMediaDocument, PeerChannel
+from telethon.tl.types import Channel, Chat, MessageMediaPhoto, MessageMediaDocument, PeerChannel, DocumentAttributeVideo
 from google import genai
 from google.genai import types
 
@@ -102,6 +102,53 @@ THUMB_TTL_SECONDS = 1_209_600   # 2 weeks
 PENDING_THUMBS_TTL = 600        # 10 minutes
 
 _pending_thumbs: dict[str, tuple[float, object]] = {}
+_video_refs: dict[str, tuple[object, int]] = {}
+_video_cache: dict[str, tuple[float, bytes]] = {}
+_video_locks: dict[str, asyncio.Lock] = {}
+_video_download_tasks: dict[str, tuple[asyncio.Task, list[bytes]]] = {}
+_video_cdn_cache: dict[str, tuple[float, str]] = {}
+_telegram_download_semaphore = asyncio.Semaphore(5)
+VIDEO_MEMORY_TTL = 300
+CDN_URL_TTL = 3600
+
+
+def _cleanup_video_cache():
+    cutoff = time.time() - VIDEO_MEMORY_TTL
+    stale = [k for k, (ts, _) in _video_cache.items() if ts < cutoff]
+    for k in stale:
+        del _video_cache[k]
+        _video_locks.pop(k, None)
+
+
+async def scrape_telegram_video_url(channel_username: str, message_id: int) -> str | None:
+    """Scrape Telegram's embed page to extract the direct CDN video URL."""
+    cache_key = f"{channel_username}_{message_id}"
+    
+    cached = _video_cdn_cache.get(cache_key)
+    if cached:
+        ts, url = cached
+        if time.time() - ts < CDN_URL_TTL:
+            return url
+    
+    try:
+        embed_url = f"https://t.me/{channel_username}/{message_id}?embed=1"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(embed_url)
+            if response.status_code != 200:
+                return None
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            video_tag = soup.find('video')
+            if video_tag:
+                src = video_tag.get('src')
+                if src:
+                    _video_cdn_cache[cache_key] = (time.time(), src)
+                    logging.info(f"Scraped CDN URL for {cache_key}: {src[:80]}...")
+                    return src
+    except Exception as e:
+        logging.warning(f"Failed to scrape video URL for {cache_key}: {e}")
+    
+    return None
 
 
 def _cleanup_pending_thumbs():
@@ -307,6 +354,8 @@ def parse_channel_posts(html: str, channel: str) -> list[dict]:
             "datetime": datetime_str,
             "photo_url": photo_url,
             "video_thumb": video_thumb,
+            "video_url": None,
+            "has_video": video_thumb is not None,
             "link_preview": link_preview,
             "channel_subscribers": None,
         })
@@ -394,6 +443,10 @@ async def fetch_channel_posts_telethon(
                 post_url = f"https://t.me/c/{real_id}/{msg.id}"
 
             photo_url = None
+            has_video = False
+            video_thumb = None
+            video_url = None
+
             if isinstance(msg.media, MessageMediaPhoto):
                 thumb_key = f"{channel_name}_{msg.id}"
                 cache_path = THUMB_CACHE_DIR / f"{thumb_key}.jpg"
@@ -402,6 +455,17 @@ async def fetch_channel_posts_telethon(
                 else:
                     _pending_thumbs[thumb_key] = (time.time(), msg.media)
                     photo_url = f"/api/thumb/{thumb_key}"
+            elif isinstance(msg.media, MessageMediaDocument) and username:
+                doc = msg.media.document
+                if doc and any(isinstance(a, DocumentAttributeVideo) for a in (doc.attributes or [])):
+                    has_video = True
+                    video_key = f"{channel_name}_{msg.id}"
+                    _video_refs[video_key] = (msg.media, doc.size or 0)
+                    video_url = None
+                    
+                    thumb_key = f"{channel_name}_{msg.id}"
+                    _pending_thumbs[thumb_key] = (time.time(), msg.media)
+                    video_thumb = f"/api/thumb/{thumb_key}"
 
             raw_posts.append({
                 "channel": channel_name,
@@ -414,7 +478,9 @@ async def fetch_channel_posts_telethon(
                 "views": views,
                 "datetime": datetime_str,
                 "photo_url": photo_url,
-                "video_thumb": None,
+                "video_thumb": video_thumb,
+                "video_url": video_url,
+                "has_video": has_video,
                 "link_preview": None,
                 "channel_subscribers": getattr(entity, "participants_count", None),
                 "_grouped_id": getattr(msg, "grouped_id", None),
@@ -460,6 +526,116 @@ async def get_thumb(thumb_key: str, request: Request):
             logger.debug("On-demand thumb download failed for %s", thumb_key)
 
     raise HTTPException(status_code=404, detail="Thumbnail not found")
+
+
+def _parse_range(range_header: str, file_size: int) -> tuple[int, int]:
+    """Parse an HTTP Range header, returning (start, end) inclusive."""
+    spec = range_header.replace("bytes=", "").strip()
+    parts = spec.split("-", 1)
+    start = int(parts[0]) if parts[0] else 0
+    end = int(parts[1]) if parts[1] else file_size - 1
+    end = min(end, file_size - 1)
+    return start, end
+
+
+@app.get("/api/video/{video_key}")
+async def get_video(video_key: str, request: Request):
+    _cleanup_video_cache()
+    
+    ref = _video_refs.get(video_key)
+    tg: TelegramClient | None = request.app.state.telegram
+    if not ref or not tg:
+        raise HTTPException(status_code=404, detail="Video not found")
+    
+    media, file_size = ref
+    range_header = request.headers.get("range")
+    
+    cached = _video_cache.get(video_key)
+    if cached:
+        _, data = cached
+        logging.info(f"Video {video_key}: Serving from cache ({len(data)} bytes)")
+        
+        if range_header:
+            start, end = _parse_range(range_header, len(data))
+            return Response(
+                content=data[start:end + 1],
+                status_code=206,
+                media_type="video/mp4",
+                headers={
+                    "Content-Range": f"bytes {start}-{end}/{len(data)}",
+                    "Accept-Ranges": "bytes",
+                    "Content-Length": str(end - start + 1),
+                },
+            )
+        return Response(
+            content=data,
+            media_type="video/mp4",
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(len(data)),
+            },
+        )
+    
+    if range_header:
+        start, end = _parse_range(range_header, file_size)
+        length = end - start + 1
+        
+        async def stream_range():
+            sent = 0
+            async with _telegram_download_semaphore:
+                logging.info(f"Video {video_key}: Streaming range {start}-{end} from Telegram...")
+                async for chunk in tg.iter_download(media, offset=start, request_size=65536):
+                    if isinstance(chunk, bytes):
+                        remaining = length - sent
+                        if remaining <= 0:
+                            break
+                        to_send = chunk[:remaining]
+                        yield to_send
+                        sent += len(to_send)
+        
+        return StreamingResponse(
+            stream_range(),
+            status_code=206,
+            media_type="video/mp4",
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Accept-Ranges": "bytes",
+            },
+        )
+    
+    async def stream_and_cache_full():
+        chunks = []
+        
+        async with _telegram_download_semaphore:
+            logging.info(f"Video {video_key}: Streaming full video from Telegram...")
+            async for chunk in tg.iter_download(media, request_size=65536):
+                if isinstance(chunk, bytes):
+                    chunks.append(chunk)
+                    yield chunk
+        
+        if video_key not in _video_locks:
+            _video_locks[video_key] = asyncio.Lock()
+        async with _video_locks[video_key]:
+            if video_key not in _video_cache:
+                full_data = b''.join(chunks)
+                _video_cache[video_key] = (time.time(), full_data)
+                logging.info(f"Video {video_key}: Cached {len(full_data)} bytes after streaming")
+    
+    return StreamingResponse(
+        stream_and_cache_full(),
+        media_type="video/mp4",
+        headers={
+            "Accept-Ranges": "bytes",
+        },
+    )
+
+
+@app.get("/api/video/cdn/{channel_username}/{message_id}")
+async def get_video_cdn_url(channel_username: str, message_id: int):
+    cdn_url = await scrape_telegram_video_url(channel_username, message_id)
+    if cdn_url:
+        return {"cdn_url": cdn_url}
+    raise HTTPException(status_code=404, detail="Could not extract video CDN URL")
 
 
 @app.post("/api/login")
