@@ -2590,14 +2590,23 @@
       }
     }
 
+    let imageLightboxHistoryActive = false;
+    let imageLightboxIgnoreNextPopstate = false;
+
     function openImageFullscreen(src, alt = '') {
       const lightbox = document.getElementById('imageLightbox');
       const img = document.getElementById('imageLightboxImg');
       if (!lightbox || !img || !src) return;
+      const wasOpen = lightbox.classList.contains('open');
       img.src = src;
       img.alt = alt || '';
       lightbox.classList.add('open');
       document.body.classList.add('image-lightbox-open');
+
+      if (!wasOpen && window.history && typeof window.history.pushState === 'function') {
+        window.history.pushState({ imageLightbox: true }, '');
+        imageLightboxHistoryActive = true;
+      }
     }
 
     function applyDynamicImageSizing(imgEl) {
@@ -2618,7 +2627,8 @@
       wrapper.style.setProperty('--image-media-width', `${widthPercent.toFixed(1)}%`);
     }
 
-    function closeImageFullscreen(evt) {
+    function closeImageFullscreen(evt, options = {}) {
+      const syncHistory = options.syncHistory !== false;
       const lightbox = document.getElementById('imageLightbox');
       const img = document.getElementById('imageLightboxImg');
       if (!lightbox || !img) return;
@@ -2628,11 +2638,30 @@
       lightbox.classList.remove('open');
       img.src = '';
       document.body.classList.remove('image-lightbox-open');
+
+      if (syncHistory && imageLightboxHistoryActive && window.history && typeof window.history.back === 'function') {
+        imageLightboxIgnoreNextPopstate = true;
+        imageLightboxHistoryActive = false;
+        window.history.back();
+      }
     }
 
     document.addEventListener('keydown', (evt) => {
       if (evt.key === 'Escape') {
         closeImageFullscreen();
+      }
+    });
+
+    window.addEventListener('popstate', () => {
+      if (imageLightboxIgnoreNextPopstate) {
+        imageLightboxIgnoreNextPopstate = false;
+        return;
+      }
+
+      const lightbox = document.getElementById('imageLightbox');
+      if (lightbox && lightbox.classList.contains('open')) {
+        closeImageFullscreen(null, { syncHistory: false });
+        imageLightboxHistoryActive = false;
       }
     });
 
