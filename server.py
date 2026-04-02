@@ -705,6 +705,10 @@ async def get_posts(request: Request, user: dict = Depends(require_auth)):
 
 @app.post("/api/top-posts")
 async def get_top_posts(request: Request, user: dict = Depends(require_auth)):
+    body = await request.json()
+    posts = body.get("posts", [])
+    logger.info("User '%s' requested Top 10 analysis (%d posts)", user["user_name"], len(posts))
+    
     config = load_config()
     ai_provider = config.get("ai_provider", "mistral")
     ai_model = config.get("ai_model", "mistral-large-latest")
@@ -716,8 +720,6 @@ async def get_top_posts(request: Request, user: dict = Depends(require_auth)):
     if ai_provider == "mistral" and not MISTRAL_API_KEY:
         return JSONResponse(status_code=503, content={"detail": "AI ranking not configured (MISTRAL_API_KEY missing)"})
 
-    body = await request.json()
-    posts = body.get("posts", [])
     if len(posts) < 10:
         return JSONResponse(status_code=400, content={"detail": "Need at least 10 posts to rank"})
 
@@ -837,7 +839,7 @@ async def get_top_posts(request: Request, user: dict = Depends(require_auth)):
     return top_posts[:10]
 
 
-async def _context_summary_gemini(request: Request) -> dict | JSONResponse:
+async def _context_summary_gemini(body: dict) -> dict | JSONResponse:
     """Generate context summary using Gemini with Google Search grounding."""
     if not GOOGLE_API_KEY:
         return JSONResponse(
@@ -845,7 +847,6 @@ async def _context_summary_gemini(request: Request) -> dict | JSONResponse:
             content={"detail": "Context summary not configured (GOOGLE_API_KEY missing)"}
         )
     
-    body = await request.json()
     post_text = body.get("post_text", "").strip()
     
     if not post_text:
@@ -900,7 +901,7 @@ async def _context_summary_gemini(request: Request) -> dict | JSONResponse:
         )
 
 
-async def _context_summary_mistral(request: Request) -> dict | JSONResponse:
+async def _context_summary_mistral(body: dict) -> dict | JSONResponse:
     """Generate context summary using Mistral AI + Tavily web search."""
     if not MISTRAL_API_KEY:
         return JSONResponse(
@@ -913,7 +914,6 @@ async def _context_summary_mistral(request: Request) -> dict | JSONResponse:
             content={"detail": "Context summary not configured (TAVILY_API_KEY missing)"}
         )
     
-    body = await request.json()
     post_text = body.get("post_text", "").strip()
     
     if not post_text:
@@ -954,13 +954,17 @@ async def _context_summary_mistral(request: Request) -> dict | JSONResponse:
 @app.post("/api/context-summary")
 async def get_context_summary(request: Request, user: dict = Depends(require_auth)):
     """Generate context summary for a post using configured provider (Gemini or Mistral+Tavily)."""
+    body = await request.json()
+    post_text = body.get("post_text", "")
+    logger.info("User '%s' requested context summary (text_length=%d)", user["user_name"], len(post_text))
+    
     config = load_config()
     context_provider = config.get("context_provider", "gemini")
     
     if context_provider == "mistral":
-        return await _context_summary_mistral(request)
+        return await _context_summary_mistral(body)
     else:
-        return await _context_summary_gemini(request)
+        return await _context_summary_gemini(body)
 
 
 @app.get("/api/config", dependencies=[Depends(require_auth)])
@@ -1007,6 +1011,7 @@ async def add_feed(request: Request, user: dict = Depends(require_auth)):
     result = await db.add_feed(user["user_id"], feed_url, is_private=is_private, admin_only=admin_only)
     if result is None:
         return JSONResponse(status_code=409, content={"detail": "Feed already exists"})
+    logger.info("User '%s' added channel '%s' (private=%s, admin_only=%s)", user["user_name"], feed_url, is_private, admin_only)
     return {"status": "success", "feed_url": feed_url}
 
 
@@ -1020,6 +1025,7 @@ async def delete_feed(request: Request, user: dict = Depends(require_auth)):
     removed = await db.remove_feed(user["user_id"], feed_url)
     if not removed:
         return JSONResponse(status_code=404, content={"detail": "Feed not found"})
+    logger.info("User '%s' removed channel '%s'", user["user_name"], feed_url)
     return {"status": "success"}
 
 
@@ -1079,6 +1085,7 @@ async def get_admin_channels(request: Request, user: dict = Depends(require_auth
 async def get_saved_posts(request: Request, user: dict = Depends(require_auth)):
     db: Database = request.app.state.db
     posts = await db.get_saved_posts(user["user_id"])
+    logger.info("User '%s' viewed saved posts (%d posts)", user["user_name"], len(posts))
     return posts
 
 
@@ -1089,6 +1096,7 @@ async def save_post(request: Request, user: dict = Depends(require_auth)):
     result = await db.save_post(user["user_id"], post)
     if result is None:
         return {"status": "exists", "message": "Post already saved"}
+    logger.info("User '%s' saved post from channel '%s' (post_id=%s)", user["user_name"], post.get("channel"), post.get("post_id"))
     return {"status": "success"}
 
 
@@ -1098,6 +1106,17 @@ async def unsave_post(channel: str, post_id: str, request: Request, user: dict =
     removed = await db.unsave_post(user["user_id"], channel, post_id)
     if not removed:
         return JSONResponse(status_code=404, content={"detail": "Saved post not found"})
+    logger.info("User '%s' unsaved post from channel '%s' (post_id=%s)", user["user_name"], channel, post_id)
+    return {"status": "success"}
+
+
+@app.post("/api/track/share")
+async def track_share(request: Request, user: dict = Depends(require_auth)):
+    """Track share actions for analytics."""
+    body = await request.json()
+    shared_to = body.get("shared_to", "unknown")
+    post_url = body.get("post_url", "")
+    logger.info("User '%s' shared post via '%s' (url=%s)", user["user_name"], shared_to, post_url)
     return {"status": "success"}
 
 

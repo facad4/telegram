@@ -52,6 +52,12 @@
       --border: #2d3240;
       --radius: 14px;
       --media-bg: #111318;
+      --video-controls-bg: var(--card-bg);
+      --video-controls-border: rgba(255,255,255,0.12);
+      --video-controls-btn-bg: rgba(255,255,255,0.15);
+      --video-controls-btn-hover: rgba(255,255,255,0.25);
+      --video-controls-btn-active: rgba(255,255,255,0.35);
+      --video-controls-icon: #fff;
     }
 
     [data-theme="light"] {
@@ -63,6 +69,12 @@
       --accent-light: #E0F2F4;
       --border: #E0DED6;
       --media-bg: #F0EFE9;
+      --video-controls-bg: var(--card-bg);
+      --video-controls-border: var(--border);
+      --video-controls-btn-bg: rgba(0,0,0,0.08);
+      --video-controls-btn-hover: rgba(0,0,0,0.16);
+      --video-controls-btn-active: rgba(0,0,0,0.24);
+      --video-controls-icon: var(--text);
     }
 
     [data-theme="light"] .channel-dropdown {
@@ -381,7 +393,14 @@
       min-width: 110px;
       max-width: 240px;
       height: 22px;
-      background: transparent;
+      background: transparent !important;
+      background-color: transparent !important;
+      border: none;
+      border-radius: 0;
+      box-shadow: none;
+      outline: none;
+      padding: 0;
+      margin: 0;
       -webkit-appearance: none;
       appearance: none;
       cursor: pointer;
@@ -974,6 +993,13 @@
       background: #FBFAF4;
     }
 
+    .post-video-embed:fullscreen .video-progress::-webkit-slider-container,
+    .post-video-embed:-webkit-full-screen .video-progress::-webkit-slider-container {
+      background: rgba(0,0,0,0.9);
+      border: none;
+      box-shadow: none;
+    }
+
     .post-video-embed:fullscreen.is-portrait-video,
     .post-video-embed:-webkit-full-screen.is-portrait-video {
       flex-direction: column;
@@ -1010,18 +1036,40 @@
     }
 
     .post-video-embed:not(:fullscreen):not(:-webkit-full-screen) .video-controls {
-      background: #F1EFE8;
-      border-top: 1px solid var(--border);
-      box-shadow: inset 0 1px 0 rgba(0,0,0,0.06);
+      background: var(--video-controls-bg);
+      border-top: 1px solid var(--video-controls-border);
+      box-shadow: none;
+      width: 100%;
     }
 
     .post-video-embed:not(:fullscreen):not(:-webkit-full-screen) .video-controls button {
-      background: rgba(0,0,0,0.08);
-      color: var(--text);
+      background: var(--video-controls-btn-bg);
+      color: var(--video-controls-icon);
+    }
+
+    .post-video-embed:not(:fullscreen):not(:-webkit-full-screen) .video-controls button:hover {
+      background: var(--video-controls-btn-hover);
+    }
+
+    .post-video-embed:not(:fullscreen):not(:-webkit-full-screen) .video-controls button:active {
+      background: var(--video-controls-btn-active);
     }
 
     .post-video-embed:not(:fullscreen):not(:-webkit-full-screen) .video-controls button svg {
-      fill: var(--text);
+      fill: var(--video-controls-icon);
+    }
+
+    .post-video-embed:not(:fullscreen):not(:-webkit-full-screen) .video-progress {
+      background: var(--video-controls-bg) !important;
+      background-color: var(--video-controls-bg) !important;
+      color-scheme: normal;
+    }
+
+    .post-video-embed:not(:fullscreen):not(:-webkit-full-screen) .video-progress::-webkit-slider-container {
+      background: var(--video-controls-bg) !important;
+      background-color: var(--video-controls-bg) !important;
+      border: none;
+      box-shadow: none;
     }
 
     /* Management Interface Styles */
@@ -2216,9 +2264,9 @@
       const encoded = encodeURIComponent(postUrl);
 
       const items = [
-        { label: 'WhatsApp', icon: '<svg viewBox="0 0 24 24" fill="#25D366"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347zM12.05 21.785h-.01a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.981.998-3.648-.235-.374A9.86 9.86 0 0 1 2.13 12.028C2.13 6.558 6.558 2.13 12.05 2.13c2.66 0 5.16 1.036 7.04 2.917a9.897 9.897 0 0 1 2.91 7.05c-.004 5.472-4.432 9.9-9.9 9.9z"/></svg>', url: `https://api.whatsapp.com/send?text=${encoded}` },
-        { label: 'Telegram', icon: '<svg viewBox="0 0 24 24" fill="#229ED9"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.2-.08-.06-.19-.04-.27-.02-.12.03-1.99 1.27-5.62 3.72-.53.36-1.01.54-1.44.53-.47-.01-1.38-.27-2.06-.49-.83-.27-1.49-.42-1.43-.88.03-.24.37-.49 1.02-.74 3.99-1.74 6.65-2.89 7.99-3.45 3.8-1.58 4.59-1.86 5.1-1.87.11 0 .37.03.54.17.14.12.18.28.2.45-.01.06.01.24 0 .38z"/></svg>', url: `https://t.me/share/url?url=${encoded}` },
-        { label: 'Email', icon: '<svg viewBox="0 0 24 24" fill="var(--text-secondary)"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>', url: `mailto:?body=${encoded}` },
+        { label: 'WhatsApp', icon: '<svg viewBox="0 0 24 24" fill="#25D366"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347zM12.05 21.785h-.01a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.981.998-3.648-.235-.374A9.86 9.86 0 0 1 2.13 12.028C2.13 6.558 6.558 2.13 12.05 2.13c2.66 0 5.16 1.036 7.04 2.917a9.897 9.897 0 0 1 2.91 7.05c-.004 5.472-4.432 9.9-9.9 9.9z"/></svg>', url: `https://api.whatsapp.com/send?text=${encoded}`, target: 'whatsapp' },
+        { label: 'Telegram', icon: '<svg viewBox="0 0 24 24" fill="#229ED9"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.2-.08-.06-.19-.04-.27-.02-.12.03-1.99 1.27-5.62 3.72-.53.36-1.01.54-1.44.53-.47-.01-1.38-.27-2.06-.49-.83-.27-1.49-.42-1.43-.88.03-.24.37-.49 1.02-.74 3.99-1.74 6.65-2.89 7.99-3.45 3.8-1.58 4.59-1.86 5.1-1.87.11 0 .37.03.54.17.14.12.18.28.2.45-.01.06.01.24 0 .38z"/></svg>', url: `https://t.me/share/url?url=${encoded}`, target: 'telegram' },
+        { label: 'Email', icon: '<svg viewBox="0 0 24 24" fill="var(--text-secondary)"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>', url: `mailto:?body=${encoded}`, target: 'email' },
         { label: 'Copy Link', icon: '<svg viewBox="0 0 24 24" fill="var(--text-secondary)"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>', action: 'copy' }
       ];
 
@@ -2239,6 +2287,7 @@
                 copyTextFallback(postUrl);
               }
               btn2.querySelector('span').textContent = 'Copied!';
+              trackShare('copy', postUrl);
               setTimeout(() => hideSharePopup(), 800);
             } catch (_) {
               btn2.querySelector('span').textContent = 'Failed';
@@ -2254,6 +2303,7 @@
           a.innerHTML = item.icon + `<span>${item.label}</span>`;
           a.addEventListener('click', (e) => {
             e.stopPropagation();
+            trackShare(item.target, postUrl);
             setTimeout(() => hideSharePopup(), 300);
           });
           popup.appendChild(a);
@@ -2293,6 +2343,7 @@
         try {
           await navigator.share({ url: postUrl });
           flashShareButton(btn, 'Shared');
+          trackShare('native', postUrl);
           return;
         } catch (e) {
           if (e && e.name === 'AbortError') return;
@@ -2300,6 +2351,18 @@
       }
 
       showSharePopup(postUrl, btn);
+    }
+
+    async function trackShare(sharedTo, postUrl) {
+      try {
+        await authFetch('/api/track/share', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ shared_to: sharedTo, post_url: postUrl })
+        });
+      } catch (_) {
+        // Silent failure for tracking
+      }
     }
 
     let videoObserver;
