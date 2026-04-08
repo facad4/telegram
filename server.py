@@ -1171,6 +1171,7 @@ async def health_check():
 
 
 @app.get("/")
+@app.head("/")
 async def root():
     return FileResponse(
         Path(__file__).parent / "static" / "index.html",

@@ -21,9 +21,16 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - **Responsive Layout**: 
   - **Desktop/Landscape**: Controls positioned below the video in a horizontal toolbar
   - **Mobile Landscape**: Controls positioned vertically on the right side to utilize unused screen space
-  - **Fullscreen Mode**: Controls positioned vertically on the right with black background and white icons for optimal contrast
-- **Theme Integration**: Controls bar matches the app's theme in normal view (paper white in light theme, dark in dark theme)
-- **Playback Continuity**: Video continues playing when entering/exiting fullscreen mode
+  - **Fullscreen Mode**: Adaptive positioning based on video orientation
+    - **Landscape videos**: Controls on the right side (vertical) with black background and white icons
+    - **Portrait videos**: Controls at the bottom (horizontal) to maximize video visibility
+- **Mobile Fullscreen Enhancements**:
+  - **Orientation Lock**: Best-effort landscape orientation lock for landscape videos (Android Chrome support)
+  - **Portrait Video Support**: Portrait videos remain in portrait orientation with bottom controls
+  - **Playback Resilience**: Multi-retry resume logic ensures video continues playing through fullscreen transitions
+  - **Auto-Pause Protection**: Videos in fullscreen are never auto-paused by viewport visibility detection
+- **Theme Integration**: Controls bar matches the app's theme in normal view (card color in both light and dark themes)
+- **Playback Continuity**: Video continues playing when entering/exiting fullscreen mode with robust retry mechanism
 - **Native Video API**: Uses HTML5 video element with custom UI overlay for consistent cross-browser experience
 
 ### 2. Better Image Handling
@@ -31,6 +38,8 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - **No Cropping**: All images displayed with `object-fit: contain` to show the full image without any cropping
 - **Responsive Scaling**: Images scale dynamically based on orientation while respecting a 70vh maximum height cap for optimal viewing
 - **In-App Fullscreen Viewer**: Tapping an image opens an in-app fullscreen viewer instead of navigating to the external Telegram post
+  - **Back Button Integration**: Mobile back button closes the image viewer before exiting the app
+  - **History State Management**: Image viewer integrates with browser history for proper navigation flow
 - **Portrait Image Optimization**: Portrait images get larger dedicated vertical space instead of being constrained to landscape containers
 - **Lazy Loading**: Images load on-demand with `loading="lazy"` for improved performance
 - **Background Consistency**: Image containers use the theme's media background color for visual cohesion
@@ -400,6 +409,24 @@ Updates global settings via admin interface. Returns 403 for non-admin users (`u
   "ai_model": "gemini-2.5-flash"
 }
 ```
+
+#### `POST /api/track/share` (protected)
+Tracks share actions for analytics and logging purposes.
+
+**Request body**:
+```json
+{
+  "shared_to": "whatsapp",
+  "post_url": "https://t.me/channel/12345"
+}
+```
+
+**Success response** (200):
+```json
+{ "status": "success" }
+```
+
+**Implementation**: Frontend calls this endpoint when users share posts via native share or custom share popup (WhatsApp, Telegram, Email, Copy). Logs include username, share method, and post URL.
 
 #### `GET /health` and `HEAD /health`
 Health check endpoint returning `{"status": "ok"}`. Supports both GET and HEAD methods for efficient health monitoring and keep-alive services.
@@ -823,6 +850,33 @@ telethon           # Telegram API client for channel search and private channel 
 - **Service worker**: Does not intercept fetch requests (avoids stripping `Authorization` headers on mobile browsers); versioned with cache-clearing on activation
 - **Cache control**: Root HTML response served with `no-cache, no-store, must-revalidate` to prevent stale frontend versions
 
+### User Action Logging
+Comprehensive server-side logging of user actions for analytics and monitoring:
+
+#### Authentication Events
+- **Login**: `User 'username' (id=123) logged in successfully`
+
+#### Channel Management
+- **Add channel**: `User 'username' added channel 'channel_url' (private=True, admin_only=False)`
+- **Remove channel**: `User 'username' removed channel 'channel_url'`
+
+#### Feature Usage
+- **Top 10 Analysis**: `User 'username' requested Top 10 analysis (50 posts)`
+- **View Saved Posts**: `User 'username' viewed saved posts (12 posts)`
+- **Save Post**: `User 'username' saved post from channel 'channelname' (post_id=12345)`
+- **Unsave Post**: `User 'username' unsaved post from channel 'channelname' (post_id=12345)`
+- **Context Summary**: `User 'username' requested context summary (text_length=245)`
+- **Share Post**: `User 'username' shared post via 'whatsapp' (url=https://...)`
+  - Tracks share method: `native` (browser share), `whatsapp`, `telegram`, `email`, `copy`
+  - Frontend calls `POST /api/track/share` endpoint with share method and post URL
+  - Tracking is fire-and-forget (silent failures) to avoid disrupting user experience
+
+#### Log Configuration
+- **Output**: stderr (default Python logging)
+- **Level**: INFO
+- **Format**: `levelname:name:message` (Python basicConfig default)
+- **Deployment**: Logs can be redirected/collected by hosting environment (Docker, Render, etc.)
+
 ### Browser Compatibility
 - **Target browsers**: Modern browsers with ES2017+ support
 - **Required features**: 
@@ -878,16 +932,17 @@ telethon           # Telegram API client for channel search and private channel 
 - `login(request)`: `POST /api/login` handler -- authenticates credentials, returns JWT token with `user_id`, and `is_admin` flag
 - `get_posts(request, user)`: `GET /api/posts` -- fetches user's feeds from Supabase, splits into public/private, scrapes public channels and fetches private channels via Telethon, returns merged sorted posts
 - `get_feeds(request, user)`: `GET /api/feeds` -- returns user's feeds as objects with `feed_url`, `is_private`, `admin_only`
-- `add_feed(request, user)`: `POST /api/feeds` -- adds a feed with duplicate check, admin-only restriction enforcement, and `is_private`/`admin_only` support (409 on conflict, 403 on admin-only violation)
-- `delete_feed(request, user)`: `DELETE /api/feeds` -- removes a feed for the user
+- `add_feed(request, user)`: `POST /api/feeds` -- adds a feed with duplicate check, admin-only restriction enforcement, and `is_private`/`admin_only` support (409 on conflict, 403 on admin-only violation); logs channel addition with username and channel details
+- `delete_feed(request, user)`: `DELETE /api/feeds` -- removes a feed for the user; logs channel removal with username and channel name
 - `search_channels(request, q, user)`: `GET /api/search-channels` -- searches Telegram for public channels via Telethon `contacts.SearchRequest`
 - `get_admin_channels(request, user)`: `GET /api/admin/channels` -- lists all channels the Telethon session is a member of (admin-only)
 - `get_full_config(user)`: `GET /api/admin/config` -- returns config.json (admin-only, 403 for non-admin)
 - `update_config(request, user)`: `POST /api/admin/config` -- updates config.json (admin-only, 403 for non-admin)
 - `get_top_posts(request, user)`: `POST /api/top-posts` -- receives posts array, computes per-post engagement ratio (views/subscribers), sends stripped-down versions to configured AI provider (Google Gemini or Groq, per `ai_provider`/`ai_model` in `config.json`) with system prompt from `top10_prompt.md`, parses response indices, returns top 10 full post objects
-- `get_context_summary(request, user)`: `POST /api/context-summary` -- routes to appropriate context provider based on `context_provider` in `config.json`
-- `_context_summary_gemini(request)`: Generates context using Google Gemini with Google Search grounding; reads `context_summary_prompt.md`, returns summary and sources
-- `_context_summary_mistral(request)`: Generates context using Mistral AI + Tavily; instantiates `WebSearch` class with config parameters, returns summary and sources
+- `get_context_summary(request, user)`: `POST /api/context-summary` -- parses request body, logs user action, routes to appropriate context provider based on `context_provider` in `config.json`
+- `_context_summary_gemini(body)`: Generates context using Google Gemini with Google Search grounding; reads `context_summary_prompt.md`, returns summary and sources
+- `_context_summary_mistral(body)`: Generates context using Mistral AI + Tavily; instantiates `WebSearch` class with config parameters, returns summary and sources
+- `track_share(request, user)`: `POST /api/track/share` -- logs share actions with username, share method, and post URL
 - `normalize_channel(raw: str) -> str`: Extracts channel name from various URL formats
 - `fetch_channel_html(client, channel) -> str | None`: Async HTTP request with error handling
 - `extract_image_url(style: str) -> str | None`: Regex extraction from CSS `url()` values
@@ -896,9 +951,9 @@ telethon           # Telegram API client for channel search and private channel 
 - `_merge_telethon_grouped(posts) -> list[dict]`: Post-processing for Telethon-fetched posts; uses `grouped_id` to merge album messages into single posts
 - `fetch_private_channel_posts(tg, channel_id, limit) -> list[dict]`: Telethon-based message fetching with base64 media encoding
 - `load_config() -> dict`: JSON config file loader
-- `get_saved_posts(request, user)`: `GET /api/saved` -- returns the logged-in user's saved posts from Supabase
-- `save_post(request, user)`: `POST /api/saved` -- saves a post for the logged-in user in Supabase (duplicate check)
-- `unsave_post(channel, post_id, request, user)`: `DELETE /api/saved/{channel}/{post_id}` -- removes a saved post for the logged-in user
+- `get_saved_posts(request, user)`: `GET /api/saved` -- returns the logged-in user's saved posts from Supabase; logs view action with username and post count
+- `save_post(request, user)`: `POST /api/saved` -- saves a post for the logged-in user in Supabase (duplicate check); logs save action with username, channel, and post_id
+- `unsave_post(channel, post_id, request, user)`: `DELETE /api/saved/{channel}/{post_id}` -- removes a saved post for the logged-in user; logs unsave action with username, channel, and post_id
 
 #### WebSearch (`web_search.py`)
 - `WebSearch.__init__(mistral_api_key, tavily_api_key, mistral_model, search_depth, max_results)`: Initializes the web search client with API keys and configuration
@@ -934,8 +989,9 @@ telethon           # Telegram API client for channel search and private channel 
 - `renderFilters()`: Dynamic, scrollable filter button generation
 - `renderPosts()`: Responsive post HTML generation with mobile support
 - `handleShareClick(evt, postUrl, btn)`: Click handler for share button with propagation control
-- `sharePost(postUrl, btn)`: Tries `navigator.share` first, falls back to custom share popup
-- `showSharePopup(postUrl, btn)`: Creates and positions the custom share popup with WhatsApp/Telegram/Email/Copy options
+- `sharePost(postUrl, btn)`: Tries `navigator.share` first, falls back to custom share popup; tracks share via `trackShare()`
+- `trackShare(sharedTo, postUrl)`: Calls `POST /api/track/share` to log share actions (fire-and-forget)
+- `showSharePopup(postUrl, btn)`: Creates and positions the custom share popup with WhatsApp/Telegram/Email/Copy options; each option tracks via `trackShare()`
 - `hideSharePopup()`: Removes any open share popup and overlay
 - `copyTextFallback(text)`: Clipboard fallback using `execCommand('copy')` for older browsers
 - `flashShareButton(btn, label)`: Briefly changes the share button label for feedback
@@ -960,6 +1016,17 @@ telethon           # Telegram API client for channel search and private channel 
 - `updateThemeButtons(theme)`: Syncs the active state of theme toggle buttons in the management panel
 - `formatDate(isoStr)`: Relative time formatting
 - `sanitizeHtml(html)`: XSS prevention for post content
+- `toggleVideoFullscreen(btn)`: Async fullscreen toggle with orientation lock support and playback continuity
+- `bindVideoAspect(container)`: Detects video orientation and applies `.is-portrait-video` class for adaptive fullscreen layout
+- `updateFullscreenOrientationMode(container)`: Applies landscape orientation lock for landscape videos, unlocks for portrait videos
+- `resumeVideoIfNeeded(container)`: Multi-retry playback resume logic for reliable fullscreen transitions
+- `handleFullscreenChange()`: Unified fullscreen change handler for both standard and webkit events
+- `getFullscreenElement()`: Cross-browser fullscreen element detection
+- `requestElementFullscreen(element)`: Cross-browser fullscreen request with fallbacks
+- `exitAnyFullscreen()`: Cross-browser fullscreen exit with fallbacks
+- `openImageFullscreen(src, alt)`: Opens image in fullscreen lightbox with history state integration
+- `closeImageFullscreen(evt, options)`: Closes image lightbox with history synchronization
+- `applyDynamicImageSizing(imgEl)`: Computes and applies CSS variables for dynamic image container sizing based on natural dimensions
 
 ### File Structure
 ```
