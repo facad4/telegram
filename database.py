@@ -49,13 +49,15 @@ class Database:
     async def add_feed(
         self, user_id: int, feed_url: str,
         is_private: bool = False, admin_only: bool = False,
+        is_alternate: bool = False,
     ) -> dict | None:
-        """Insert a feed row. Returns None if (user_id, feed_url) already exists."""
+        """Insert a feed row. Returns None if (user_id, feed_url, is_alternate) already exists."""
         existing = (
             await self.client.table("feeds")
             .select("*")
             .eq("user_id", user_id)
             .eq("feed_url", feed_url)
+            .eq("is_alternate", is_alternate)
             .execute()
         )
         if existing.data:
@@ -67,6 +69,7 @@ class Database:
                 "feed_url": feed_url,
                 "is_private": is_private,
                 "admin_only": admin_only,
+                "is_alternate": is_alternate,
             })
             .execute()
         )
@@ -84,12 +87,23 @@ class Database:
         )
         return bool(response.data)
 
-    async def remove_feed(self, user_id: int, feed_url: str) -> bool:
+    async def get_alternate_feeds(self) -> list[dict]:
+        """Return all feed rows where is_alternate=true (global, not user-scoped)."""
+        response = (
+            await self.client.table("feeds")
+            .select("*")
+            .eq("is_alternate", True)
+            .execute()
+        )
+        return response.data
+
+    async def remove_feed(self, user_id: int, feed_url: str, is_alternate: bool = False) -> bool:
         response = (
             await self.client.table("feeds")
             .delete()
             .eq("user_id", user_id)
             .eq("feed_url", feed_url)
+            .eq("is_alternate", is_alternate)
             .execute()
         )
         return bool(response.data)

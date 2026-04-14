@@ -1189,6 +1189,34 @@
       background: #1976d2;
     }
 
+    .home-popup {
+      position: fixed;
+      top: 44px;
+      left: 4px;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+      z-index: 200;
+      min-width: 160px;
+      padding: 4px 0;
+      display: none;
+    }
+    .home-popup.visible { display: block; }
+    .home-popup-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      font-size: 0.88rem;
+      color: var(--text);
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+    .home-popup-item:hover { background: var(--border); }
+    .home-popup-item svg { width: 16px; height: 16px; fill: currentColor; flex-shrink: 0; }
+
     .autocomplete-backdrop {
       position: fixed;
       inset: 0;
@@ -1760,6 +1788,16 @@
         <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M10,20V14H14V20H19V12H22L12,3L2,12H5V20H10Z"/></svg>
       </a>
     </div>
+    <div class="home-popup" id="homePopup">
+      <div class="home-popup-item" id="homePopupMain">
+        <svg viewBox="0 0 24 24"><path d="M10,20V14H14V20H19V12H22L12,3L2,12H5V20H10Z"/></svg>
+        Main Feed
+      </div>
+      <div class="home-popup-item" id="homePopupAlternate">
+        <svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 3c1.93 0 3.5 1.57 3.5 3.5S13.93 13 12 13s-3.5-1.57-3.5-3.5S10.07 6 12 6zm7 13H5v-.23c0-.62.28-1.2.76-1.58C7.47 15.82 9.64 15 12 15s4.53.82 6.24 2.19c.48.38.76.97.76 1.58V19z"/></svg>
+        Alternate Feed
+      </div>
+    </div>
     <div class="control-buttons">
       <button class="control-btn" id="syncBtn" title="Refresh posts manually">
         <svg viewBox="0 0 24 24">
@@ -1848,6 +1886,12 @@
       <div id="privateChannelsError" style="color:#ef5350; font-size:0.85rem; margin-top:6px; min-height:1.2em;"></div>
     </div>
 
+    <div class="management-section" id="alternateFeedSection" style="display:none;">
+      <h3>Alternate Feed Channels (Admin)</h3>
+      <div class="channel-list" id="alternateFeedList"></div>
+      <button class="add-btn" id="addAlternateFeedBtn" style="margin-top:10px;">+ Add Alternate Channel</button>
+    </div>
+
     <div class="management-section" id="adminSettingsSection" style="display:none;">
       <h3>Settings (Admin)</h3>
       <div class="settings-grid">
@@ -1926,6 +1970,16 @@
       <div class="autocomplete-popup-hint">Type at least 4 characters to search for channels</div>
     </div>
   </div>
+  <div class="autocomplete-backdrop" id="altAcBackdrop"></div>
+  <div class="autocomplete-popup" id="altAcPopup">
+    <div class="autocomplete-popup-header">
+      <input type="text" id="altAcPopupInput" placeholder="Search channels or paste URL..." autocomplete="off">
+    </div>
+    <div class="autocomplete-popup-error" id="altAcPopupError"></div>
+    <div class="autocomplete-popup-results" id="altAcPopupResults">
+      <div class="autocomplete-popup-hint">Type at least 4 characters to search for channels</div>
+    </div>
+  </div>
   </div><!-- end appContainer -->
 
   <div id="imageLightbox" class="image-lightbox" onclick="closeImageFullscreen(event)">
@@ -1985,7 +2039,7 @@
     let scrollSpeed = 50;
     let scrollAnimId = null;
     let paused = false;
-    let currentView = 'main'; // 'main', 'saved', 'top10', or 'management'
+    let currentView = 'main'; // 'main', 'alternate', 'saved', 'top10', or 'management'
     let mainFeedPostsCache = [];
     let top10Cache = [];
     let feedRefreshedSinceTop10 = true;
@@ -2044,6 +2098,33 @@
         if (!isInitialLoad) {
           document.getElementById('postsContainer').innerHTML =
             '<div class="error-msg">Failed to load posts. Will retry on next refresh.</div>';
+        }
+      }
+    }
+
+    async function fetchAlternatePosts() {
+      const dot = document.getElementById('statusDot');
+      const text = document.getElementById('statusText');
+      const isInitialLoad = allPosts.length === 0;
+      dot.classList.add('loading');
+      text.textContent = isInitialLoad ? 'Loading alternate feed...' : 'Refreshing alternate feed...';
+
+      try {
+        const resp = await authFetch('/api/alternate-posts');
+        if (!resp.ok) throw new Error('Failed');
+        allPosts = await resp.json();
+        renderFilters();
+        renderPosts();
+        const now = new Date();
+        text.textContent = `Alternate Feed ${now.toLocaleTimeString()}`;
+        dot.classList.remove('loading');
+      } catch (e) {
+        dot.classList.remove('loading');
+        dot.style.background = '#ef5350';
+        text.textContent = 'Error';
+        if (!isInitialLoad) {
+          document.getElementById('postsContainer').innerHTML =
+            '<div class="error-msg">Failed to load alternate feed. Will retry on next refresh.</div>';
         }
       }
     }
@@ -2900,6 +2981,18 @@
         document.getElementById('stopScrollBtn').style.display = '';
         document.querySelector('.filter-wrapper').style.display = '';
         fetchTop10Posts();
+      } else if (view === 'alternate') {
+        document.getElementById('mainFeedLink').classList.add('active');
+        document.getElementById('scrollViewport').style.display = '';
+        document.getElementById('managementContainer').style.display = 'none';
+        document.getElementById('managementContainer').style.marginTop = '';
+        controlButtons.style.display = '';
+        filterBar.style.display = '';
+        document.getElementById('syncBtn').style.display = '';
+        document.getElementById('orderBtn').style.display = '';
+        document.getElementById('stopScrollBtn').style.display = '';
+        document.querySelector('.filter-wrapper').style.display = '';
+        fetchAlternatePosts();
       } else if (view === 'management') {
         showHeader();
         document.getElementById('scrollViewport').style.display = 'none';
@@ -3156,10 +3249,12 @@
       const isAdmin = localStorage.getItem('is_admin') === 'true';
       document.getElementById('adminSettingsSection').style.display = isAdmin ? 'block' : 'none';
       document.getElementById('privateChannelsSection').style.display = isAdmin ? 'block' : 'none';
+      document.getElementById('alternateFeedSection').style.display = isAdmin ? 'block' : 'none';
 
       updateThemeButtons(localStorage.getItem('theme') || 'light');
       document.getElementById('autoHideHeaderToggle').checked = autoHideHeader;
       await loadFeedList();
+      if (isAdmin) await loadAlternateFeedList();
 
       if (isAdmin) {
         try {
@@ -3198,11 +3293,12 @@
       try {
         const resp = await authFetch('/api/feeds');
         const feeds = await resp.json();
-        if (!feeds.length) {
+        const mainFeeds = feeds.filter(f => !f.is_alternate);
+        if (!mainFeeds.length) {
           container.innerHTML = '<div style="color:var(--text-secondary); font-size:0.9rem; padding:8px 0;">No channels configured yet.</div>';
           return;
         }
-        container.innerHTML = feeds.map(f => {
+        container.innerHTML = mainFeeds.map(f => {
           const badges = [];
           if (f.is_private) badges.push('<span style="background:var(--accent);color:#fff;font-size:0.7rem;padding:1px 6px;border-radius:4px;margin-left:6px;">Private</span>');
           if (f.admin_only) badges.push('<span style="background:#ef5350;color:#fff;font-size:0.7rem;padding:1px 6px;border-radius:4px;margin-left:4px;">Admin</span>');
@@ -3418,17 +3514,227 @@
       if (active) active.scrollIntoView({ block: 'nearest' });
     }
 
-    async function removeFeed(feedUrl) {
+    async function removeFeed(feedUrl, isAlternate = false) {
       try {
         await authFetch('/api/feeds', {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ feed_url: feedUrl })
+          body: JSON.stringify({ feed_url: feedUrl, is_alternate: isAlternate })
         });
-        await loadFeedList();
+        if (!isAlternate) await loadFeedList();
       } catch (e) {
         console.error('Failed to remove feed:', e);
       }
+    }
+
+    async function loadAlternateFeedList() {
+      const container = document.getElementById('alternateFeedList');
+      try {
+        const resp = await authFetch('/api/feeds');
+        const feeds = await resp.json();
+        const altFeeds = feeds.filter(f => f.is_alternate);
+        if (!altFeeds.length) {
+          container.innerHTML = '<div style="color:var(--text-secondary); font-size:0.9rem; padding:8px 0;">No alternate feed channels yet.</div>';
+          return;
+        }
+        container.innerHTML = altFeeds.map(f => {
+          const badges = [];
+          if (f.is_private) badges.push('<span style="background:var(--accent);color:#fff;font-size:0.7rem;padding:1px 6px;border-radius:4px;margin-left:6px;">Private</span>');
+          return `
+          <div class="channel-item">
+            <span style="flex:1; font-size:0.9rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${f.feed_url}${badges.join('')}</span>
+            <button class="remove-btn" data-url="${f.feed_url}">Remove</button>
+          </div>`;
+        }).join('');
+        container.querySelectorAll('.remove-btn').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            await removeFeed(btn.dataset.url, true);
+            await loadAlternateFeedList();
+          });
+        });
+      } catch (e) {
+        container.innerHTML = '<div class="error-msg">Failed to load alternate feeds.</div>';
+      }
+    }
+
+    let altAcDebounceTimer = null;
+    let altAcActiveIndex = -1;
+    let altAcResults = [];
+
+    function openAltAddChannelPopup() {
+      const backdrop = document.getElementById('altAcBackdrop');
+      const popup = document.getElementById('altAcPopup');
+      const input = document.getElementById('altAcPopupInput');
+      const errorEl = document.getElementById('altAcPopupError');
+      const results = document.getElementById('altAcPopupResults');
+      errorEl.textContent = '';
+      input.value = '';
+      results.innerHTML = '<div class="autocomplete-popup-hint">Type at least 4 characters to search for channels</div>';
+      altAcResults = [];
+      altAcActiveIndex = -1;
+      backdrop.style.display = 'block';
+      popup.style.display = 'flex';
+      setTimeout(() => input.focus(), 50);
+    }
+
+    function closeAltAddChannelPopup() {
+      document.getElementById('altAcBackdrop').style.display = 'none';
+      document.getElementById('altAcPopup').style.display = 'none';
+      document.getElementById('altAcPopupError').textContent = '';
+      altAcResults = [];
+      altAcActiveIndex = -1;
+      clearTimeout(altAcDebounceTimer);
+    }
+
+    function renderAltAcResults(items) {
+      const resultsEl = document.getElementById('altAcPopupResults');
+      altAcResults = items;
+      altAcActiveIndex = -1;
+      if (!items.length) {
+        resultsEl.innerHTML = '<div class="autocomplete-popup-hint">No channels found</div>';
+        return;
+      }
+      resultsEl.innerHTML = items.map((ch, i) => `
+        <div class="autocomplete-item" data-index="${i}">
+          <div class="autocomplete-item-info">
+            <div class="autocomplete-item-title">${ch.title}</div>
+            <div class="autocomplete-item-username">@${ch.username}</div>
+          </div>
+          ${ch.participants_count ? `<div class="autocomplete-item-members">${formatMemberCount(ch.participants_count)} members</div>` : ''}
+          <button class="autocomplete-item-add" data-index="${i}">Add</button>
+        </div>
+      `).join('');
+      resultsEl.querySelectorAll('.autocomplete-item-add').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          addAltChannelFromPopup(parseInt(btn.dataset.index), btn);
+        });
+      });
+    }
+
+    async function addAltChannelFromPopup(index, btn) {
+      if (index < 0 || index >= altAcResults.length) return;
+      const ch = altAcResults[index];
+      const url = 'https://t.me/' + ch.username;
+      const errorEl = document.getElementById('altAcPopupError');
+      errorEl.textContent = '';
+      btn.disabled = true;
+      btn.textContent = '...';
+      try {
+        const resp = await authFetch('/api/feeds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ feed_url: url, is_alternate: true })
+        });
+        if (resp.status === 409) {
+          errorEl.textContent = 'Feed already exists.';
+          btn.textContent = 'Added';
+          return;
+        }
+        if (!resp.ok) throw new Error('Failed to add feed');
+        btn.textContent = 'Added';
+        await loadAlternateFeedList();
+      } catch (e) {
+        errorEl.textContent = 'Error: ' + e.message;
+        btn.disabled = false;
+        btn.textContent = 'Add';
+      }
+    }
+
+    async function addAltFeedByUrl() {
+      const input = document.getElementById('altAcPopupInput');
+      const errorEl = document.getElementById('altAcPopupError');
+      const url = input.value.trim();
+      errorEl.textContent = '';
+      if (!url) return;
+      try {
+        const resp = await authFetch('/api/feeds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ feed_url: url, is_alternate: true })
+        });
+        if (resp.status === 409) {
+          errorEl.textContent = 'Feed already exists.';
+          return;
+        }
+        if (!resp.ok) throw new Error('Failed to add feed');
+        input.value = '';
+        await loadAlternateFeedList();
+        closeAltAddChannelPopup();
+      } catch (e) {
+        errorEl.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    async function searchAltChannels(query) {
+      const resultsEl = document.getElementById('altAcPopupResults');
+      if (query.length < 4) {
+        resultsEl.innerHTML = '<div class="autocomplete-popup-hint">Type at least 4 characters to search for channels</div>';
+        altAcResults = [];
+        return;
+      }
+      resultsEl.innerHTML = '<div class="autocomplete-loading">Searching...</div>';
+      try {
+        const resp = await authFetch('/api/search-channels?q=' + encodeURIComponent(query));
+        if (!resp.ok) {
+          resultsEl.innerHTML = '<div class="autocomplete-popup-hint">Search failed</div>';
+          return;
+        }
+        const results = await resp.json();
+        renderAltAcResults(results);
+      } catch (e) {
+        resultsEl.innerHTML = '<div class="autocomplete-popup-hint">Search failed</div>';
+      }
+    }
+
+    function setupAltAutocomplete() {
+      const input = document.getElementById('altAcPopupInput');
+      const backdrop = document.getElementById('altAcBackdrop');
+
+      input.addEventListener('input', () => {
+        clearTimeout(altAcDebounceTimer);
+        const val = input.value.trim();
+        if (val.startsWith('http://') || val.startsWith('https://') || val.startsWith('t.me/')) {
+          document.getElementById('altAcPopupResults').innerHTML = '<div class="autocomplete-popup-hint">Press Enter to add this URL</div>';
+          altAcResults = [];
+          return;
+        }
+        altAcDebounceTimer = setTimeout(() => searchAltChannels(val), 300);
+      });
+
+      input.addEventListener('keydown', (e) => {
+        const resultsEl = document.getElementById('altAcPopupResults');
+        if (altAcResults.length) {
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            altAcActiveIndex = Math.min(altAcActiveIndex + 1, altAcResults.length - 1);
+            resultsEl.querySelectorAll('.autocomplete-item').forEach((el, i) => el.classList.toggle('active', i === altAcActiveIndex));
+            const active = resultsEl.querySelector('.autocomplete-item.active');
+            if (active) active.scrollIntoView({ block: 'nearest' });
+            return;
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            altAcActiveIndex = Math.max(altAcActiveIndex - 1, 0);
+            resultsEl.querySelectorAll('.autocomplete-item').forEach((el, i) => el.classList.toggle('active', i === altAcActiveIndex));
+            const active = resultsEl.querySelector('.autocomplete-item.active');
+            if (active) active.scrollIntoView({ block: 'nearest' });
+            return;
+          }
+        }
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          if (altAcActiveIndex >= 0 && altAcResults.length) {
+            const btn = resultsEl.querySelector(`.autocomplete-item[data-index="${altAcActiveIndex}"] .autocomplete-item-add`);
+            if (btn && !btn.disabled) addAltChannelFromPopup(altAcActiveIndex, btn);
+          } else {
+            addAltFeedByUrl();
+          }
+        } else if (e.key === 'Escape') {
+          closeAltAddChannelPopup();
+        }
+      });
+
+      backdrop.addEventListener('click', () => closeAltAddChannelPopup());
     }
 
     async function loadPrivateChannels() {
@@ -3588,6 +3894,8 @@
       try {
         if (currentView === 'main') {
           await fetchPosts();
+        } else if (currentView === 'alternate') {
+          await fetchAlternatePosts();
         } else if (currentView === 'saved') {
           await fetchSavedPosts();
         } else if (currentView === 'top10') {
@@ -3633,11 +3941,6 @@
     }
 
     async function init() {
-      document.getElementById('mainFeedLink').addEventListener('click', (e) => {
-        e.preventDefault();
-        showView('main');
-      });
-
       document.getElementById('savedFeedLink').addEventListener('click', (e) => {
         e.preventDefault();
         showView('saved');
@@ -3668,6 +3971,8 @@
       });
 
       setupAutocomplete();
+      document.getElementById('addAlternateFeedBtn').addEventListener('click', openAltAddChannelPopup);
+      setupAltAutocomplete();
 
       applyAutoHideHeader();
       await Promise.all([fetchConfig(), loadSavedPostIds(), fetchPosts()]);
@@ -3743,6 +4048,37 @@
     // Auth gate: check token on load
     document.getElementById('loginForm').addEventListener('submit', handleLogin);
     document.getElementById('logoutBtn').addEventListener('click', handleLogout);
+
+    // Home popup (registered once, outside init() to avoid duplicates)
+    document.getElementById('mainFeedLink').addEventListener('click', (e) => {
+      e.preventDefault();
+      const isAdmin = localStorage.getItem('is_admin') === 'true';
+      if (!isAdmin) {
+        showView('main');
+        return;
+      }
+      const popup = document.getElementById('homePopup');
+      if (popup.classList.contains('visible')) {
+        popup.classList.remove('visible');
+        return;
+      }
+      popup.classList.add('visible');
+    });
+    document.getElementById('homePopupMain').addEventListener('click', () => {
+      document.getElementById('homePopup').classList.remove('visible');
+      showView('main');
+    });
+    document.getElementById('homePopupAlternate').addEventListener('click', () => {
+      document.getElementById('homePopup').classList.remove('visible');
+      showView('alternate');
+    });
+    document.addEventListener('click', (e) => {
+      const popup = document.getElementById('homePopup');
+      const link = document.getElementById('mainFeedLink');
+      if (popup.classList.contains('visible') && !popup.contains(e.target) && !link.contains(e.target)) {
+        popup.classList.remove('visible');
+      }
+    });
 
     if (localStorage.getItem('token')) {
       showApp();

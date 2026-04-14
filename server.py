@@ -667,6 +667,7 @@ async def login(request: Request):
 async def get_posts(request: Request, user: dict = Depends(require_auth)):
     db: Database = request.app.state.db
     feeds = await db.get_feeds_for_user(user["user_id"])
+    feeds = [f for f in feeds if not f.get("is_alternate")]
     config = load_config()
     max_posts = config.get("max_posts", 100)
     fetch_limit = config.get("fetch_per_channel", 50)
@@ -700,6 +701,51 @@ async def get_posts(request: Request, user: dict = Depends(require_auth)):
                 all_posts.extend(parse_channel_posts(html, ch))
 
     all_posts.sort(key=lambda p: p["datetime"], reverse=True)
+    return all_posts[:max_posts]
+
+
+@app.get("/api/alternate-posts")
+async def get_alternate_posts(request: Request, user: dict = Depends(require_auth)):
+    """Return posts from alternate-feed channels (admin only)."""
+    if user.get("user_id") != 1:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    db: Database = request.app.state.db
+    feeds = await db.get_alternate_feeds()
+    config = load_config()
+    max_posts = config.get("max_posts", 100)
+    fetch_limit = config.get("fetch_per_channel", 50)
+
+    public_feeds = [f for f in feeds if not f.get("is_private") and f.get("feed_url")]
+    private_feeds = [f for f in feeds if f.get("is_private") and f.get("feed_url")]
+
+    tg: TelegramClient | None = request.app.state.telegram
+    all_posts = []
+
+    if tg:
+        media_sem = asyncio.Semaphore(config.get("media_concurrency", 5))
+        telethon_tasks = []
+        for f in public_feeds:
+            username = normalize_channel(f["feed_url"])
+            telethon_tasks.append(fetch_channel_posts_telethon(tg, username, limit=fetch_limit, media_sem=media_sem))
+        for f in private_feeds:
+            telethon_tasks.append(fetch_channel_posts_telethon(tg, PeerChannel(int(f["feed_url"])), limit=fetch_limit, media_sem=media_sem))
+        if telethon_tasks:
+            results = await asyncio.gather(*telethon_tasks)
+            for posts in results:
+                all_posts.extend(posts)
+    else:
+        public_channels = [normalize_channel(f["feed_url"]) for f in public_feeds]
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            results = await asyncio.gather(
+                *[fetch_channel_html(client, ch) for ch in public_channels]
+            )
+        for ch, html in zip(public_channels, results):
+            if html:
+                all_posts.extend(parse_channel_posts(html, ch))
+
+    all_posts.sort(key=lambda p: p["datetime"], reverse=True)
+    logger.info("Admin requested alternate feed (%d posts)", len(all_posts[:max_posts]))
     return all_posts[:max_posts]
 
 
@@ -985,6 +1031,7 @@ async def get_feeds(request: Request, user: dict = Depends(require_auth)):
             "feed_url": f["feed_url"],
             "is_private": f.get("is_private", False),
             "admin_only": f.get("admin_only", False),
+            "is_alternate": f.get("is_alternate", False),
         }
         for f in feeds
     ]
@@ -999,19 +1046,22 @@ async def add_feed(request: Request, user: dict = Depends(require_auth)):
 
     is_private = body.get("is_private", False)
     admin_only = body.get("admin_only", False)
+    is_alternate = body.get("is_alternate", False)
 
     db: Database = request.app.state.db
 
     if user.get("user_id") != 1:
         if admin_only:
             raise HTTPException(status_code=403, detail="Only admin can create admin-only feeds")
+        if is_alternate:
+            raise HTTPException(status_code=403, detail="Only admin can create alternate feed channels")
         if await db.is_feed_admin_only(feed_url):
             raise HTTPException(status_code=403, detail="This channel is restricted to admin")
 
-    result = await db.add_feed(user["user_id"], feed_url, is_private=is_private, admin_only=admin_only)
+    result = await db.add_feed(user["user_id"], feed_url, is_private=is_private, admin_only=admin_only, is_alternate=is_alternate)
     if result is None:
         return JSONResponse(status_code=409, content={"detail": "Feed already exists"})
-    logger.info("User '%s' added channel '%s' (private=%s, admin_only=%s)", user["user_name"], feed_url, is_private, admin_only)
+    logger.info("User '%s' added channel '%s' (private=%s, admin_only=%s, alternate=%s)", user["user_name"], feed_url, is_private, admin_only, is_alternate)
     return {"status": "success", "feed_url": feed_url}
 
 
@@ -1021,11 +1071,12 @@ async def delete_feed(request: Request, user: dict = Depends(require_auth)):
     feed_url = body.get("feed_url", "").strip()
     if not feed_url:
         return JSONResponse(status_code=400, content={"detail": "feed_url is required"})
+    is_alternate = body.get("is_alternate", False)
     db: Database = request.app.state.db
-    removed = await db.remove_feed(user["user_id"], feed_url)
+    removed = await db.remove_feed(user["user_id"], feed_url, is_alternate=is_alternate)
     if not removed:
         return JSONResponse(status_code=404, content={"detail": "Feed not found"})
-    logger.info("User '%s' removed channel '%s'", user["user_name"], feed_url)
+    logger.info("User '%s' removed channel '%s' (alternate=%s)", user["user_name"], feed_url, is_alternate)
     return {"status": "success"}
 
 
