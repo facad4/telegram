@@ -1916,6 +1916,10 @@
           <input type="number" id="mediaConcurrency" min="1" max="20">
         </div>
         <div class="setting-item">
+          <label>Alternate Feed Max Posts</label>
+          <input type="number" id="altFeedMaxPosts" min="5" max="500">
+        </div>
+        <div class="setting-item">
           <label>AI Provider</label>
           <select id="aiProvider" style="padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--card-bg); color:var(--text); font-size:0.9rem;">
             <option value="gemini">Google Gemini</option>
@@ -3265,6 +3269,7 @@
           document.getElementById('fetchPerChannel').value = config.fetch_per_channel || 50;
           document.getElementById('scrollSpeed').value = config.scroll_speed || 50;
           document.getElementById('mediaConcurrency').value = config.media_concurrency || 5;
+          document.getElementById('altFeedMaxPosts').value = config.alternate_feed_max_posts || 100;
           const provider = config.ai_provider || 'gemini';
           document.getElementById('aiProvider').value = provider;
           updateAiModelOptions(provider);
@@ -3851,6 +3856,7 @@
         fetch_per_channel: parseInt(document.getElementById('fetchPerChannel').value),
         scroll_speed: parseInt(document.getElementById('scrollSpeed').value),
         media_concurrency: parseInt(document.getElementById('mediaConcurrency').value),
+        alternate_feed_max_posts: parseInt(document.getElementById('altFeedMaxPosts').value),
         ai_provider: document.getElementById('aiProvider').value,
         ai_model: document.getElementById('aiModel').value,
         context_provider: document.getElementById('contextProviderSelect').value,

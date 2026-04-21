@@ -4,6 +4,7 @@
   "fetch_per_channel": 50,
   "scroll_speed": 50,
   "media_concurrency": 20,
+  "alternate_feed_max_posts": 300,
   "ai_provider": "mistral",
   "ai_model": "mistral-large-latest",
   "context_provider": "mistral",

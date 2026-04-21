@@ -713,7 +713,7 @@ async def get_alternate_posts(request: Request, user: dict = Depends(require_aut
     db: Database = request.app.state.db
     feeds = await db.get_alternate_feeds()
     config = load_config()
-    max_posts = config.get("max_posts", 100)
+    max_posts = config.get("alternate_feed_max_posts", 100)
     fetch_limit = config.get("fetch_per_channel", 50)
 
     public_feeds = [f for f in feeds if not f.get("is_private") and f.get("feed_url")]

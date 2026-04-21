@@ -57,6 +57,7 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
   - Public preview URL: `"https://t.me/s/channelname"`
 - **Private channels**: Stored by numeric channel ID with `is_private=true` flag; fetched via Telethon API
 - **Admin-only feeds**: Feeds with `admin_only=true` can only be added by the admin user (`id = 1`); non-admin users are rejected with 403
+- **Alternate feeds**: Feeds with `is_alternate=true` belong to a separate curated feed managed by the admin; the same channel URL can exist in both the main and alternate feed independently
 
 #### Global Settings (`config.json`)
 - **File**: `config.json`
@@ -72,12 +73,13 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
     "context_provider": "gemini",
     "context_mistral_model": "mistral-large-latest",
     "context_tavily_depth": "basic",
-    "context_tavily_max_results": 5
+    "context_tavily_max_results": 5,
+    "alternate_feed_max_posts": 100
   }
   ```
 - **Settings**:
   - `refresh_interval_minutes`: Auto-refresh interval for main feed (1-60 minutes)
-  - `max_posts`: Maximum posts to display (5-100)
+  - `max_posts`: Maximum posts to display in main feed (5-100)
   - `scroll_speed`: Auto-scroll speed in pixels/second (10-200)
   - `media_concurrency`: Concurrent media downloads (1-20)
   - `ai_provider`: AI provider for Top 10 ranking - "gemini", "mistral", or "groq"
@@ -86,6 +88,7 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
   - `context_mistral_model`: Mistral model for context search (when `context_provider` is "mistral")
   - `context_tavily_depth`: Tavily search depth - "basic" or "advanced" (when `context_provider` is "mistral")
   - `context_tavily_max_results`: Number of search results to fetch (3-10, when `context_provider` is "mistral")
+  - `alternate_feed_max_posts`: Maximum posts to return from the alternate feed endpoint (5-500)
 - Editable only by admin user (`id = 1`) via the management interface
 
 ### 2. Data Fetching
@@ -122,11 +125,12 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - **Grouped media merging**: `_merge_telethon_grouped()` uses Telethon's `grouped_id` attribute to detect album messages and merges them into a single post per group
 
 #### Post Fetching Pipeline (`GET /api/posts`)
-1. Load user's feeds from Supabase (includes `is_private` flag)
-2. Split feeds into public (`is_private=false`) and private (`is_private=true`)
-3. Public channels: fetched via httpx scraping (unchanged)
-4. Private channels: fetched via Telethon `get_messages()` (if Telegram client is available)
-5. Merge all posts, sort by datetime (descending), return top `max_posts`
+1. Load user's feeds from Supabase (includes `is_private` and `is_alternate` flags)
+2. Filter out feeds where `is_alternate=true` (alternate feed has its own endpoint)
+3. Split remaining feeds into public (`is_private=false`) and private (`is_private=true`)
+4. Public channels: fetched via httpx scraping (unchanged)
+5. Private channels: fetched via Telethon `get_messages()` (if Telegram client is available)
+6. Merge all posts, sort by datetime (descending), return top `max_posts`
 
 ### 3. Authentication System
 
@@ -192,12 +196,13 @@ Authenticates a user against the Supabase `Users` table.
 ```
 
 #### `GET /api/posts` (protected)
-Returns the latest posts from the logged-in user's configured channels (both public and private), sorted by datetime (newest first), limited to `max_posts`.
+Returns the latest posts from the logged-in user's configured main-feed channels (both public and private), sorted by datetime (newest first), limited to `max_posts`. Feeds marked as `is_alternate=true` are excluded.
 
 **Implementation**: 
 - Extracts `user_id` from JWT payload
 - Queries Supabase `Feeds` table for the user's feeds (including `is_private` flag)
-- Splits feeds into public and private
+- Filters out feeds where `is_alternate=true`
+- Splits remaining feeds into public and private
 - Public: normalizes channel names, fetches via httpx scraping concurrently
 - Private: fetches via Telethon `get_messages()` concurrently (if Telegram client available)
 - Merges and sorts all posts by datetime (descending)
@@ -298,14 +303,29 @@ Generates contextual information for a Telegram post using web search. Supports 
 - 503: `{ "detail": "Context summary not configured (MISTRAL_API_KEY missing)" }` (Mistral provider)
 - 503: `{ "detail": "Context summary not configured (TAVILY_API_KEY missing)" }` (Mistral provider)
 
+#### `GET /api/alternate-posts` (protected, admin-only)
+Returns the latest posts from all alternate-feed channels (feeds where `is_alternate=true`), sorted by datetime (newest first), limited to `alternate_feed_max_posts` from `config.json`.
+
+**Implementation**:
+- Admin-only (`user_id == 1`); returns 403 for non-admin users
+- Queries all feeds where `is_alternate=true` (global, not user-scoped)
+- Splits into public and private feeds
+- Fetches posts via Telethon (if available) or httpx scraping (fallback)
+- Returns merged, sorted posts capped at `alternate_feed_max_posts`
+
+**Response format**: Same JSON array of post objects as `GET /api/posts`.
+
+**Error responses**:
+- 403: `{ "detail": "Admin access required" }` (non-admin user)
+
 #### `GET /api/feeds` (protected)
 Returns the logged-in user's feeds from Supabase as objects with metadata.
 
 **Response format**:
 ```json
 [
-  { "feed_url": "https://t.me/channel1", "is_private": false, "admin_only": false },
-  { "feed_url": "1234567890", "is_private": true, "admin_only": true }
+  { "feed_url": "https://t.me/channel1", "is_private": false, "admin_only": false, "is_alternate": false },
+  { "feed_url": "1234567890", "is_private": true, "admin_only": true, "is_alternate": false }
 ]
 ```
 
@@ -314,10 +334,10 @@ Adds a feed for the logged-in user with duplicate prevention and admin-only rest
 
 **Request body**:
 ```json
-{ "feed_url": "https://t.me/channelname", "is_private": false, "admin_only": false }
+{ "feed_url": "https://t.me/channelname", "is_private": false, "admin_only": false, "is_alternate": false }
 ```
 
-The `is_private` and `admin_only` fields are optional (default `false`).
+The `is_private`, `admin_only`, and `is_alternate` fields are optional (default `false`). Setting `is_alternate` to `true` requires admin access. The same channel URL can exist as both a main feed and an alternate feed without conflict.
 
 **Success response** (200):
 ```json
@@ -325,16 +345,17 @@ The `is_private` and `admin_only` fields are optional (default `false`).
 ```
 
 **Error responses**:
-- 409: `{ "detail": "Feed already exists" }` (duplicate)
+- 409: `{ "detail": "Feed already exists" }` (duplicate within the same feed type)
 - 403: `{ "detail": "This channel is restricted to admin" }` (non-admin trying to add admin-only feed)
 - 403: `{ "detail": "Only admin can create admin-only feeds" }` (non-admin setting admin_only flag)
+- 403: `{ "detail": "Only admin can create alternate feed channels" }` (non-admin setting is_alternate flag)
 
 #### `DELETE /api/feeds` (protected)
-Removes a feed for the logged-in user.
+Removes a feed for the logged-in user. The `is_alternate` flag ensures only the correct feed type is deleted (a channel can exist in both main and alternate feeds).
 
 **Request body**:
 ```json
-{ "feed_url": "https://t.me/channelname" }
+{ "feed_url": "https://t.me/channelname", "is_alternate": false }
 ```
 
 **Success response** (200):
@@ -405,6 +426,7 @@ Updates global settings via admin interface. Returns 403 for non-admin users (`u
   "max_posts": 100,
   "scroll_speed": 50,
   "media_concurrency": 20,
+  "alternate_feed_max_posts": 100,
   "ai_provider": "gemini",
   "ai_model": "gemini-2.5-flash"
 }
@@ -462,13 +484,15 @@ Serves the main application (`static/index.html`) with `Cache-Control: no-cache,
 - **Border radius**: 14px consistent rounded corners
 
 #### Navigation System
-- **Multi-View Interface**: Four distinct views accessible via header navigation
-  - **Main Feed**: Primary channel content (default view, "Main" link on left)
+- **Multi-View Interface**: Five distinct views accessible via header navigation
+  - **Main Feed**: Primary channel content (default view, "Home" link on left)
+  - **Alternate Feed**: Admin-curated secondary feed (accessible via Home button popup, admin only)
   - **Saved Posts**: Bookmarked posts (bookmark icon in control buttons)
   - **Top 10**: AI-ranked most important posts (❗ icon in control buttons)
   - **Management Interface**: Feed and admin controls (⚙️ icon on top-right)
+- **Home Button Popup** (admin only): Clicking the Home button shows a popup menu with "Main Feed" and "Alternate Feed" options; non-admin users go directly to the main feed. Clicking outside the popup dismisses it.
 - **Navigation Layout**: Streamlined header without logo
-  - **Left side**: Main navigation link + control buttons
+  - **Left side**: Home navigation link + control buttons
   - **Right side**: Filter bar, status, settings icon, logout button
 - **Context-Aware UI**: Different controls shown based on current view; management view hides feed-specific controls (sync, sort, stop/resume, filter) on mobile
 
@@ -614,6 +638,16 @@ Each post tile has a Share button in the footer (between views count and save bu
 - **Single Expansion**: Only one context summary can be open at a time; opening a new one closes the previous
 - **Error Handling**: Graceful error display if API keys are missing or service is unavailable
 
+#### Alternate Feed (Admin Only)
+- **Purpose**: A separate curated feed of Telegram channels managed by the admin, independent of the main feed
+- **Access**: Admin users access the alternate feed via a popup menu on the Home button; non-admin users see only the main feed
+- **Home Button Popup**: Clicking Home shows a fixed popup with "Main Feed" and "Alternate Feed" options; clicking outside or selecting an option closes it; event listeners are registered once at the top-level script scope to avoid duplication
+- **Alternate View**: Dedicated `showView('alternate')` branch fetches posts from `GET /api/alternate-posts` and renders them in the standard feed layout
+- **Management**: A dedicated "Alternate Feed Channels" section in the admin settings allows adding/removing channels with the same autocomplete experience as the main feed
+- **Post Limit**: Controlled by the `alternate_feed_max_posts` setting in `config.json` (separate from the main feed's `max_posts`)
+- **Feed Isolation**: Main feed (`GET /api/posts`) filters out `is_alternate=true` feeds; alternate feed (`GET /api/alternate-posts`) only returns `is_alternate=true` feeds
+- **Standalone Digest Script**: `generate_alternate_digest.py` fetches alternate feed posts, processes them through Mistral AI for deduplication/ranking/rephrasing, maintains persistent history in `digest_history.json` (with incremental updates and raw post tracking to avoid reprocessing), and generates a local HTML digest file showing the full archive (see Standalone Scripts section)
+
 #### Content Processing
 - **HTML sanitization**: `sanitizeHtml()` function removes `onclick`, adds security attributes
 - **Date formatting**: Relative time display (minutes/hours/days ago) with fallback to date
@@ -633,9 +667,10 @@ Each post tile has a Share button in the footer (between views count and save bu
 
 #### View Data Management
 - **View Switching**: `showView(view)` function manages interface state; resets inline display styles to avoid overriding CSS defaults (e.g. `display: contents` on mobile)
-  - **Main View**: Fetches from `/api/posts` (user's channels from Supabase -- both public and private); restores all control buttons and filter
+  - **Main View**: Fetches from `/api/posts` (user's main-feed channels from Supabase -- both public and private, excluding alternate feeds); restores all control buttons and filter
+  - **Alternate View**: Fetches from `/api/alternate-posts` (admin only); displays posts from the alternate feed channels
   - **Saved View**: Fetches from `/api/saved` (bookmarked posts); restores all control buttons and filter
-  - **Management View**: Loads feed management interface (and admin settings + private channels if admin); hides sync, sort, stop/resume buttons and filter wrapper
+  - **Management View**: Loads feed management interface (and admin settings + private channels + alternate feed management if admin); hides sync, sort, stop/resume buttons and filter wrapper
 - **Auto-Refresh**: Periodic refresh of main feed only
 - **UI State Management**: Controls visibility of filters, buttons based on active view
 
@@ -649,12 +684,13 @@ Each post tile has a Share button in the footer (between views count and save bu
    - `startScrolling()`: Auto-scroll with pause/resume functionality
 
 #### Management Interface Flow
-1. **Feed Loading**: Fetch user's feeds via `GET /api/feeds` (returns objects with `feed_url`, `is_private`, `admin_only`)
-2. **Feed Display**: Render feed list with badges (Private, Admin) and remove buttons
+1. **Feed Loading**: Fetch user's feeds via `GET /api/feeds` (returns objects with `feed_url`, `is_private`, `admin_only`, `is_alternate`)
+2. **Main Feed Display**: Render main feed list (excluding `is_alternate=true`) with badges (Private, Admin) and remove buttons
 3. **Add Feed**: Input field + Add button; calls `POST /api/feeds` with duplicate detection (409 → "Feed already exists" message)
-4. **Remove Feed**: Remove button calls `DELETE /api/feeds` and refreshes the list
+4. **Remove Feed**: Remove button calls `DELETE /api/feeds` with appropriate `is_alternate` flag and refreshes the list
 5. **Private Channels** (admin only): "Load My Telegram Channels" button calls `GET /api/admin/channels`, displays available channels with "Add" buttons; adding sends `POST /api/feeds` with `is_private: true, admin_only: true`
-6. **Admin Settings** (admin only): Load settings via `GET /api/admin/config`, save via `POST /api/admin/config`
+6. **Alternate Feed Management** (admin only): Separate section with its own channel list, autocomplete input, and add/remove buttons; all operations use `is_alternate: true`
+7. **Admin Settings** (admin only): Load settings via `GET /api/admin/config`, save via `POST /api/admin/config`
 
 #### PWA Integration
 1. **Service Worker**: Register versioned service worker (v2.0) for PWA compliance; clears legacy caches on activation
@@ -686,18 +722,19 @@ Each post tile has a Share button in the footer (between views count and save bu
 - **Admin user**: User with `id = 1` has admin privileges (can edit global settings)
 
 ##### `Feeds` Table
-| Column       | Type    | Description                                               |
-|--------------|---------|-----------------------------------------------------------|
-| `user_id`    | bigint  | Foreign key to `Users.id` (NOT NULL)                      |
-| `feed_url`   | text    | Telegram channel URL or numeric channel ID (for private)  |
-| `is_private` | boolean | Whether the channel requires Telethon API (default false) |
-| `admin_only` | boolean | Whether only admin can have this feed (default false)     |
+| Column         | Type    | Description                                               |
+|----------------|---------|-----------------------------------------------------------|
+| `user_id`      | bigint  | Foreign key to `Users.id` (NOT NULL)                      |
+| `feed_url`     | text    | Telegram channel URL or numeric channel ID (for private)  |
+| `is_private`   | boolean | Whether the channel requires Telethon API (default false) |
+| `admin_only`   | boolean | Whether only admin can have this feed (default false)     |
+| `is_alternate` | boolean | Whether the feed belongs to the alternate feed (default false) |
 
 - **Foreign Key**: `user_id` references `Users.id` with `ON DELETE CASCADE`
 - **Index**: `idx_feeds_user_id` on `user_id` for join/RLS performance
 - **RLS**: Row Level Security requires appropriate policies for the API key to read/write rows
-- **Duplicate Prevention**: Application-level check before insert (query for existing `user_id` + `feed_url` pair)
-- **Migration SQL**: `ALTER TABLE feeds ADD COLUMN is_private boolean DEFAULT false; ALTER TABLE feeds ADD COLUMN admin_only boolean DEFAULT false;`
+- **Duplicate Prevention**: Application-level check before insert (query for existing `user_id` + `feed_url` + `is_alternate` tuple); the same channel URL can exist once as a main feed and once as an alternate feed
+- **Migration SQL**: `ALTER TABLE feeds ADD COLUMN is_private boolean DEFAULT false; ALTER TABLE feeds ADD COLUMN admin_only boolean DEFAULT false; ALTER TABLE feeds ADD COLUMN is_alternate boolean DEFAULT false;`
 
 ##### `save_for_later` Table
 | Column      | Type                     | Description                                    |
@@ -900,9 +937,84 @@ Comprehensive server-side logging of user actions for analytics and monitoring:
   "context_provider": "gemini",
   "context_mistral_model": "mistral-large-latest",
   "context_tavily_depth": "basic",
-  "context_tavily_max_results": 5
+  "context_tavily_max_results": 5,
+  "alternate_feed_max_posts": 100
 }
 ```
+
+## Standalone Scripts
+
+### Alternate Feed Digest (`generate_alternate_digest.py`)
+
+A CLI tool that fetches posts from the alternate feed, processes them through Mistral AI, generates a standalone HTML digest file, and optionally posts new stories to a Telegram channel. Maintains persistent history in `digest_history.json` for incremental updates across runs.
+
+**Usage**:
+```bash
+python generate_alternate_digest.py
+```
+
+**Environment variables** (from `.env` or shell):
+- `DIGEST_SERVER_URL` – base URL of the TelegramUpdates server (e.g. `https://app.onrender.com`); auto-prepends `http://` if no protocol is specified
+- `DIGEST_USERNAME` – admin username for login
+- `DIGEST_PASSWORD` – admin password for login
+- `MISTRAL_API_KEY` – Mistral API key for AI processing
+- `DIGEST_TELEGRAM_CHANNEL` – target Telegram channel (`@username` or numeric ID); if not set, Telegram posting is skipped
+- `TELEGRAM_API_ID` – Telegram API ID (reused from server config; required for posting)
+- `TELEGRAM_API_HASH` – Telegram API hash (reused from server config; required for posting)
+- `TELEGRAM_SESSION` – Telethon StringSession (reused from server config; required for posting)
+
+**Pipeline**:
+1. **Authentication**: Logs in via `POST /api/login` using admin credentials; verifies admin status
+2. **Fetch Posts**: Calls `GET /api/alternate-posts` with JWT authentication
+3. **Load History**: Reads `digest_history.json` containing accumulated stories and a set of previously processed raw post keys (`channel_postid`)
+4. **Filter New Posts**: Compares fetched posts against `processed_post_keys` from history; only posts with a `channel_postid` key not in the set are sent to Mistral. If no new posts exist, the script regenerates HTML from existing history and exits
+5. **Prepare for LLM**: Strips heavy fields (HTML, base64 images), truncates text, computes engagement ratio (views/subscribers)
+6. **Mistral AI Processing**: Sends `{"new_posts": [...], "previously_generated": [...]}` with the system prompt from `alternate_feed_prompt.md`. The `previously_generated` array contains the last 100 stories from history (sorted by recency) for deduplication context. The LLM returns up to 10 new stories/updates, each with `source_indices` (referencing `new_posts`) and `history_index` (null for new, index for updates)
+7. **Media URL Resolution**: Converts relative `/api/` media URLs to absolute URLs using the server base URL; includes `photo_url`, `video_thumb`, and `link_preview.image` fallbacks. Uses URL-path fingerprinting (Layer 1 dedup) to eliminate CDN variants of the same image before downloading
+8. **Save History**: Appends new stories to `full_history`. Updates are appended with a `parent_index` linking to the original story. All raw post keys from the current batch are added to `processed_post_keys` (regardless of whether they produced output). Persists `posted_media_hashes` for cross-run media dedup. Writes to `digest_history.json`
+9. **Video URL Resolution** (optional, only when Telegram posting is enabled): Scans source posts referenced by each story's `source_indices` for `has_video=true`. For public channels, scrapes the Telegram embed page (`https://t.me/{channel}/{post_id}?embed=1`) to extract the direct CDN video URL from the `<video>` tag. Private channel videos are skipped (their thumbnails are still posted as images). Collected URLs are stored in a `video_urls` list on each story
+10. **Telegram Channel Posting** (optional): If `DIGEST_TELEGRAM_CHANNEL` is set and Telegram credentials are configured, posts each new story and update to the target channel via Telethon. Updates are prefixed with "**עדכון**". Media images are downloaded into memory, deduplicated by content hash (Layer 2: within-run, Layer 3: cross-run via persisted `posted_media_hashes`), and sent as photo albums. Videos are downloaded from CDN URLs (120s timeout) and uploaded individually with `supports_streaming=True`. Images are sent first (as album with caption), then videos (2s delay between each). Text-only stories are sent as plain messages. Posts are spaced 1.5s apart to avoid rate limits. Failures are logged but non-fatal
+11. **HTML Generation**: Produces a self-contained `alternate_digest.html` rendering the **full history archive** (all accumulated stories), sorted by most recent first. Stories from the latest run display importance rank badges (#1, #2, etc.); updates display an "UPDATE" badge with distinct styling; older stories have no rank badge
+
+**History file** (`digest_history.json`):
+```json
+{
+  "stories": [ /* accumulated story objects with text, importance, media_urls, source_indices, history_index, parent_index, created_at, updated_at */ ],
+  "processed_post_keys": [ /* sorted list of "channel_postid" strings for all raw posts ever sent to Mistral */ ],
+  "posted_media_hashes": [ /* sorted list of MD5 hex strings for all media images posted to Telegram */ ],
+  "last_updated": "2026-04-18T23:10:49"
+}
+```
+
+**Logging**: All output uses a `log()` helper that prepends timestamps (e.g. `[2026-04-18 23:10:02]`). New stories are logged as `[NEW]`, updates as `[UPDATE for #N]`.
+
+**Key functions**:
+- `log(msg, error=False)`: Timestamped logging to stdout/stderr
+- `login(base_url, username, password) -> str`: Authenticates and returns JWT
+- `fetch_alternate_posts(base_url, token) -> list[dict]`: Fetches posts from the alternate-posts endpoint
+- `load_history() -> tuple[list[dict], set[str], set[str]]`: Loads stories, processed post keys, and posted media hashes from `digest_history.json`
+- `_post_key(post) -> str`: Builds unique key (`channel_postid`) for a raw Telegram post
+- `prepare_slim_posts(posts) -> list[dict]`: Strips heavy fields, computes engagement ratio
+- `call_mistral(api_key, model, prompt, user_content) -> list[dict]`: Sends to Mistral AI, parses structured JSON response (300s timeout)
+- `_media_url_fingerprint(url) -> str`: Extracts a stable fingerprint from a URL by stripping query params and isolating the path tail (Layer 1 dedup)
+- `resolve_media_urls(stories, original_posts, base_url) -> list[dict]`: Converts relative media URLs to absolute with URL-path fingerprint dedup
+- `scrape_video_cdn_url(channel, post_id) -> str | None`: Scrapes Telegram's embed page to extract the direct CDN video URL from the `<video>` tag; public channels only
+- `resolve_video_urls(stories, original_posts) -> list[dict]`: Scans source posts for `has_video=true`, scrapes CDN URLs, populates `video_urls` list on each story; skips private channels
+- `connect_telegram() -> TelegramClient | None`: Creates and connects a Telethon client; returns `None` if credentials are missing or session is unauthorized
+- `post_stories_to_telegram(stories, channel, posted_media_hashes) -> set[str]`: Posts stories to a Telegram channel with content-hash media dedup (Layers 2+3); downloads images and videos into memory, sends photo albums then individual videos with streaming support, returns updated hash set
+- `save_history(new_stories, full_history, offset, filtered_posts, processed_keys, posted_media_hashes)`: Appends stories, tracks post keys and media hashes, writes to disk
+- `generate_html(stories, output_path)`: Renders the full history archive as a dark-themed HTML file with clickable media, rank badges, and update badges
+
+### Alternate Feed Prompt (`alternate_feed_prompt.md`)
+
+System prompt used by the standalone digest script for Mistral AI processing. Contains six sections:
+
+1. **Core Task**: Operational steps — deduplicate, select (up to 10), merge same-event posts, rephrase, strip source attribution, enforce temporal accuracy, topical coherence, source constraint, and media preservation
+2. **Persona**: "The Proud Patriot" (הפטריוט הגאה) — constructive Zionist editorial voice with nationalism, directness, love for Israel, and a loyalty rule for internal challenges
+3. **Ranking & Selection Criteria**: Impact, relevancy, engagement ratio, cross-references, depth & media; exclusions for missile alerts, promotional content, and donation appeals
+4. **Input & Output Format**: Receives `{"new_posts": [...], "previously_generated": [...]}`. The `previously_generated` array is READ-ONLY context for deduplication — never a source for generating new content. Returns `{"stories": [...]}` with `history_index` (null for new stories, index for updates) and `source_indices` referencing `new_posts`
+5. **Incremental History Updates**: Mandatory duplicate check against entire `previously_generated` array using event-based matching (WHO, WHAT, WHERE, WHEN — not wording). Includes: reactions/commentary = same event rule, check updates too, within-batch dedup, concrete Hebrew examples of same-event matches. Updates must contain genuinely new facts from `new_posts`; pure duplicates are skipped. Variable output count (0 to 10, never more)
+6. **Final Verification** (5 steps, mandatory before returning): self-dedup, history cross-check, update content check, final count cap, source audit (every output item must have valid `source_indices` from `new_posts`)
 
 ## Known Limitations
 
@@ -930,10 +1042,11 @@ Comprehensive server-side logging of user actions for analytics and monitoring:
 - `require_auth(request) -> dict`: FastAPI dependency that verifies JWT `Authorization: Bearer` header; returns decoded payload with `user_id` and `user_name`
 - `lifespan(app)`: Async context manager that initializes `Database` and Telegram client at startup
 - `login(request)`: `POST /api/login` handler -- authenticates credentials, returns JWT token with `user_id`, and `is_admin` flag
-- `get_posts(request, user)`: `GET /api/posts` -- fetches user's feeds from Supabase, splits into public/private, scrapes public channels and fetches private channels via Telethon, returns merged sorted posts
-- `get_feeds(request, user)`: `GET /api/feeds` -- returns user's feeds as objects with `feed_url`, `is_private`, `admin_only`
-- `add_feed(request, user)`: `POST /api/feeds` -- adds a feed with duplicate check, admin-only restriction enforcement, and `is_private`/`admin_only` support (409 on conflict, 403 on admin-only violation); logs channel addition with username and channel details
-- `delete_feed(request, user)`: `DELETE /api/feeds` -- removes a feed for the user; logs channel removal with username and channel name
+- `get_posts(request, user)`: `GET /api/posts` -- fetches user's feeds from Supabase, filters out alternate feeds, splits into public/private, scrapes public channels and fetches private channels via Telethon, returns merged sorted posts
+- `get_alternate_posts(request, user)`: `GET /api/alternate-posts` -- admin-only; fetches all alternate-feed channels, returns posts limited to `alternate_feed_max_posts`
+- `get_feeds(request, user)`: `GET /api/feeds` -- returns user's feeds as objects with `feed_url`, `is_private`, `admin_only`, `is_alternate`
+- `add_feed(request, user)`: `POST /api/feeds` -- adds a feed with duplicate check on `(user_id, feed_url, is_alternate)`, admin-only restriction enforcement, and `is_private`/`admin_only`/`is_alternate` support (409 on conflict, 403 on admin-only or alternate violation); logs channel addition with username and channel details
+- `delete_feed(request, user)`: `DELETE /api/feeds` -- removes a feed for the user scoped by `is_alternate`; logs channel removal with username and channel name
 - `search_channels(request, q, user)`: `GET /api/search-channels` -- searches Telegram for public channels via Telethon `contacts.SearchRequest`
 - `get_admin_channels(request, user)`: `GET /api/admin/channels` -- lists all channels the Telethon session is a member of (admin-only)
 - `get_full_config(user)`: `GET /api/admin/config` -- returns config.json (admin-only, 403 for non-admin)
@@ -969,8 +1082,9 @@ Comprehensive server-side logging of user actions for analytics and monitoring:
 - `Database.get_all_feeds() -> list[dict]`: Fetches all rows from the `Feeds` table
 - `Database.authenticate_user(user_name, password) -> dict | None`: Queries `Users` for matching credentials
 - `Database.get_feeds_for_user(user_id) -> list[dict]`: Fetches feeds for a specific user
-- `Database.add_feed(user_id, feed_url, is_private, admin_only) -> dict | None`: Inserts a feed with duplicate check and private/admin-only flags; returns `None` if duplicate
-- `Database.remove_feed(user_id, feed_url) -> bool`: Deletes a feed row; returns whether deletion occurred
+- `Database.add_feed(user_id, feed_url, is_private=False, admin_only=False, is_alternate=False) -> dict | None`: Inserts a feed with duplicate check on `(user_id, feed_url, is_alternate)` tuple and private/admin-only/alternate flags; returns `None` if duplicate
+- `Database.remove_feed(user_id, feed_url, is_alternate=False) -> bool`: Deletes the matching feed row scoped by `is_alternate`; returns whether deletion occurred
+- `Database.get_alternate_feeds() -> list[dict]`: Returns all feed rows where `is_alternate=true` (global, not user-scoped)
 - `Database.is_feed_admin_only(feed_url) -> bool`: Checks if any feed with this URL is marked admin_only
 - `Database.get_saved_posts(user_id) -> list[dict]`: Fetches saved posts for a user from `save_for_later`, parses JSON
 - `Database.save_post(user_id, post) -> dict | None`: Saves a post with duplicate check; returns `None` if duplicate
@@ -984,7 +1098,7 @@ Comprehensive server-side logging of user actions for analytics and monitoring:
 - `showApp()` / `showLogin()`: Toggle visibility between login overlay and app container
 - `fetchConfig()`: Loads client settings from `/api/config`
 - `fetchPosts()`: Main feed data fetching with loading states
-- `showView(view)`: Multi-view navigation and state management (`main`, `saved`, `management`); resets inline display styles to preserve CSS defaults; hides feed-specific controls in management view
+- `showView(view)`: Multi-view navigation and state management (`main`, `alternate`, `saved`, `management`); resets inline display styles to preserve CSS defaults; hides feed-specific controls in management view
 - `startScrolling()`: Auto-scroll animation engine
 - `renderFilters()`: Dynamic, scrollable filter button generation
 - `renderPosts()`: Responsive post HTML generation with mobile support
@@ -995,8 +1109,8 @@ Comprehensive server-side logging of user actions for analytics and monitoring:
 - `hideSharePopup()`: Removes any open share popup and overlay
 - `copyTextFallback(text)`: Clipboard fallback using `execCommand('copy')` for older browsers
 - `flashShareButton(btn, label)`: Briefly changes the share button label for feedback
-- `loadManagementInterface()`: Loads feed list, private channels section (admin), and settings (admin)
-- `loadFeedList()`: Fetches and renders user's feeds from `/api/feeds` with Private/Admin badges
+- `loadManagementInterface()`: Loads feed list, private channels section (admin), alternate feed management (admin), and settings (admin)
+- `loadFeedList()`: Fetches and renders user's main feeds from `/api/feeds` (excluding `is_alternate=true`) with Private/Admin badges
 - `addFeed()`: Adds a feed via `POST /api/feeds` with duplicate error display
 - `loadPrivateChannels()`: Fetches and displays available private channels from `GET /api/admin/channels` (admin only)
 - `addPrivateChannel(channelId, btn)`: Adds a private channel as admin-only feed via `POST /api/feeds`
@@ -1007,7 +1121,13 @@ Comprehensive server-side logging of user actions for analytics and monitoring:
 - `fetchTop10Posts(forceRefresh)`: Sends current feed posts to `POST /api/top-posts` for AI ranking; serves from `top10Cache` if available and feed hasn't been refreshed; displays loading state, floating bubble notification, renders top 10 results, handles errors
 - `showFloatingBubble(message)`: Creates a temporary floating bubble notification that fades in, displays for 3 seconds, and auto-removes from the DOM
 - `updateAiModelOptions(provider)`: Populates the AI Model dropdown with models appropriate for the selected provider (Gemini or Groq)
-- `removeFeed(feedUrl)`: Removes a feed via `DELETE /api/feeds`
+- `fetchAlternatePosts()`: Fetches and renders posts from `GET /api/alternate-posts` (admin only)
+- `loadAlternateFeedList()`: Fetches and displays only `is_alternate=true` feeds in the alternate feed management section
+- `setupAltAutocomplete()`: Initializes channel search autocomplete for the alternate feed input
+- `openAltAddChannelPopup()` / `closeAltAddChannelPopup()`: Opens/closes the autocomplete popup for adding alternate feed channels
+- `searchAltChannels(query)`: Searches for channels to add to the alternate feed
+- `addAltChannelFromPopup(index)` / `addAltFeedByUrl(url)`: Adds a channel to the alternate feed via `POST /api/feeds` with `is_alternate: true`
+- `removeFeed(feedUrl, isAlternate=false)`: Removes a feed via `DELETE /api/feeds` with `is_alternate` flag
 - `saveAdminSettings()`: Saves global settings via `POST /api/admin/config` (admin only)
 - `manualSync()`: Manual post refresh with loading states
 - `toggleSortOrder()`: Client-side post sorting toggle
@@ -1034,13 +1154,16 @@ Comprehensive server-side logging of user actions for analytics and monitoring:
 ├── server.py              # FastAPI backend with PWA support, Supabase lifespan, and Telethon integration
 ├── database.py            # Database class encapsulating Supabase async client
 ├── web_search.py          # WebSearch class for Mistral AI + Tavily web search integration
-├── config.json            # Global settings (refresh interval, max posts, scroll speed, AI provider/model, context provider)
+├── config.json            # Global settings (refresh interval, max posts, scroll speed, AI provider/model, context provider, alternate feed max posts)
 ├── top10_prompt.md        # Editable system prompt for AI Top 10 ranking (with exclusion rules)
+├── alternate_feed_prompt.md   # System prompt for Mistral AI alternate feed processing (dedup, rank, rephrase)
 ├── context_summary_prompt.md  # System prompt for Gemini context search with Google Search grounding
 ├── search_terms.md        # Prompt for Mistral AI to extract search terms from posts
 ├── summarize.md           # Prompt for Mistral AI to summarize web search results
 ├── generate_session.py    # Telethon StringSession generator (dev/prod labeled sessions)
-├── .env                   # Environment variables (SUPABASE_URL, SUPABASE_KEY, TELEGRAM_*, GROK_API_KEY, GOOGLE_API_KEY, MISTRAL_API_KEY, TAVILY_API_KEY)
+├── generate_alternate_digest.py  # Standalone script: fetch alternate feed, process with Mistral AI, generate HTML digest, optionally post to Telegram channel
+├── digest_history.json    # Persistent storage for generated stories, processed post keys, and posted media hashes (created/updated by generate_alternate_digest.py)
+├── .env                   # Environment variables (SUPABASE_URL, SUPABASE_KEY, TELEGRAM_*, GROK_API_KEY, GOOGLE_API_KEY, MISTRAL_API_KEY, TAVILY_API_KEY, DIGEST_SERVER_URL, DIGEST_USERNAME, DIGEST_PASSWORD, DIGEST_TELEGRAM_CHANNEL)
 ├── requirements.txt       # Python dependencies
 ├── static/
 │   ├── index.html         # Complete frontend application with PWA and share system
@@ -1109,9 +1232,16 @@ Comprehensive server-side logging of user actions for analytics and monitoring:
 - **Default**: Light theme if no preference is stored
 - **Light Theme**: Perplexity AI-inspired color scheme (Paper White, Offblack text, True Turquoise accents)
 
+### Alternate Feed Management (Admin Only)
+- **Dedicated Section**: Separate "Alternate Feed Channels" section in the management interface (visible only for admin)
+- **Add Channel**: Autocomplete-powered input for searching and adding channels to the alternate feed; calls `POST /api/feeds` with `is_alternate: true`
+- **Remove Channel**: Remove button next to each alternate feed channel; calls `DELETE /api/feeds` with `is_alternate: true`
+- **Independent Lists**: Main feed and alternate feed channel lists are displayed separately; the same channel can appear in both
+
 ### Settings Management (Admin Only, `user_id = 1`)
 - **Refresh Interval**: Configurable auto-refresh timing (1-60 minutes)
-- **Max Posts**: Post limit configuration (5-100 posts)
+- **Max Posts**: Main feed post limit configuration (5-100 posts)
+- **Alternate Feed Max Posts**: Alternate feed post limit configuration (5-500 posts)
 - **Scroll Speed**: Auto-scroll speed adjustment (10-200 pixels/second)
 - **AI Provider**: Select between Google Gemini and Groq for AI ranking
 - **AI Model**: Model selector populated dynamically based on selected provider (Gemini: gemini-2.0-flash-lite, gemini-2.0-flash, gemini-2.5-flash-lite, gemini-2.5-flash, gemini-2.5-pro; Groq: llama-3.3-70b-versatile, llama-3.1-8b-instant, etc.)

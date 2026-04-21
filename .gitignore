@@ -24,3 +24,7 @@ ANDROID_DEVELOPMENT_GUIDE.md
 __pycache__/server.cpython-313.pyc
 alternate_digest.html
 generate_alternate_digest.py
+alternate_feed_prompt.md.orig
+.env.orig
+digest_cron.log
+digest_history.json
