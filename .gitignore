@@ -1,4 +1,5 @@
 venv/
+.venv/
 __pycache__/
 *.pyc
 .git/
@@ -27,3 +28,7 @@ alternate_feed_prompt.md.orig
 .env.orig
 digest_cron.log
 digest_history.json
+.claude/
+util.bat
+generate_alternate_digest.py.orig
+digest.log

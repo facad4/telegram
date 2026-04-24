@@ -35,6 +35,9 @@ from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
+if sys.stdout.encoding != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 load_dotenv()
 
 PROMPT_PATH = Path(__file__).parent / "alternate_feed_prompt.md"
@@ -44,6 +47,12 @@ HISTORY_PATH = Path(__file__).parent / "digest_history.json"
 # --- Script Configuration ---
 POST_TO_CHANNEL = True   # Post stories to the Telegram channel (requires DIGEST_TELEGRAM_CHANNEL env var)
 POST_VIDEOS = False      # Download and post videos from source posts
+
+DIVIDER = "\u200e          ────── · ──────"
+
+
+def wrap_with_divider(text: str) -> str:
+    return f"{DIVIDER}\n\n{text}\n\n{DIVIDER}\n\n\u200b"
 
 
 def log(msg: str, error: bool = False) -> None:
@@ -59,8 +68,8 @@ def load_config() -> dict:
         return {}
 
 
-def load_history() -> tuple[list[dict], set[str], set[str]]:
-    """Load previously generated stories, processed post keys, and posted media hashes."""
+def load_history() -> tuple[list[dict], set[str], set[str], dict[str, str]]:
+    """Load previously generated stories, processed post keys, posted media hashes, and post texts."""
     try:
         data = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
         stories = data.get("stories", [])
@@ -68,9 +77,10 @@ def load_history() -> tuple[list[dict], set[str], set[str]]:
             stories = []
         keys = data.get("processed_post_keys", [])
         media_hashes = data.get("posted_media_hashes", [])
-        return stories, set(keys), set(media_hashes)
+        post_texts = data.get("processed_post_texts", {})
+        return stories, set(keys), set(media_hashes), post_texts
     except (FileNotFoundError, json.JSONDecodeError):
-        return [], set(), set()
+        return [], set(), set(), {}
 
 
 def _story_preview(story: dict, max_len: int = 80) -> str:
@@ -92,6 +102,7 @@ def save_history(
     filtered_posts: list[dict],
     processed_keys: set[str],
     posted_media_hashes: set[str] | None = None,
+    processed_post_texts: dict[str, str] | None = None,
 ) -> None:
     """Append new stories/updates to history and track processed raw post keys."""
     now = datetime.now().isoformat()
@@ -119,12 +130,20 @@ def save_history(
             added += 1
             log(f"  [NEW] {_story_preview(story)}")
 
+    if processed_post_texts is None:
+        processed_post_texts = {}
+
     for post in filtered_posts:
-        processed_keys.add(_post_key(post))
+        key = _post_key(post)
+        processed_keys.add(key)
+        text = _get_post_text(post)
+        if text:
+            processed_post_texts[key] = text[:300]
 
     payload = {
         "stories": full_history,
         "processed_post_keys": sorted(processed_keys),
+        "processed_post_texts": processed_post_texts,
         "posted_media_hashes": sorted(posted_media_hashes) if posted_media_hashes else [],
         "last_updated": now,
     }
@@ -196,6 +215,131 @@ def prepare_slim_posts(posts: list[dict]) -> list[dict]:
     return slim
 
 
+def _get_post_text(post: dict) -> str:
+    """Extract plain text from a post for comparison, stripping HTML if needed."""
+    text = post.get("text_plain", "")
+    if not text:
+        text_html = post.get("text_html", "")
+        if text_html:
+            text = re.sub(r"<[^>]+>", "", text_html)
+    return text
+
+
+def _text_similarity(text1: str, text2: str) -> float:
+    """Compute similarity between two texts (0.0 to 1.0)."""
+    import difflib
+    return difflib.SequenceMatcher(None, text1, text2).ratio()
+
+
+def deduplicate_posts(posts: list[dict], similarity_threshold: float = 0.85) -> list[dict]:
+    """Remove near-duplicate posts within a batch, keeping the most complete version.
+
+    Uses substring containment + fuzzy matching to detect duplicates.
+    Returns deduplicated list and logs removed duplicates.
+    """
+    if not posts:
+        return posts
+
+    deduplicated = []
+    skip_indices: set[int] = set()
+
+    _get_text = _get_post_text
+
+    for i, post_i in enumerate(posts):
+        if i in skip_indices:
+            continue
+
+        text_i = _get_text(post_i)
+        kept_post = post_i
+        duplicates = [i]
+
+        for j, post_j in enumerate(posts):
+            if i >= j or j in skip_indices:
+                continue
+
+            text_j = _get_text(post_j)
+
+            # Check substring containment (one is mostly contained in the other)
+            if len(text_i) > 0 and len(text_j) > 0:
+                min_len = min(len(text_i), len(text_j))
+                max_len = max(len(text_i), len(text_j))
+                ratio = min_len / max_len
+
+                # If one is >80% contained in the other, they're likely duplicates
+                if ratio > 0.80:
+                    # Also check fuzzy similarity
+                    similarity = _text_similarity(text_i, text_j)
+                    log(f"  [DEBUG] Comparing posts {i} vs {j}: len_ratio={ratio:.1%}, similarity={similarity:.4f}")
+                    if similarity > similarity_threshold:
+                        log(f"    → MATCH! Marking post {j} as duplicate")
+                        duplicates.append(j)
+                        skip_indices.add(j)
+                        # Keep the longer post as the "source"
+                        if len(text_j) > len(text_i):
+                            kept_post = post_j
+                            text_i = text_j
+
+        if len(duplicates) > 1:
+            log(f"  Deduplicated {len(duplicates)} posts: kept post from channel '{kept_post.get('channel')}' (merged {len(duplicates)-1} near-duplicates)")
+
+        deduplicated.append(kept_post)
+
+    if len(skip_indices) > 0:
+        log(f"Post deduplication: {len(posts)} posts → {len(deduplicated)} after removing {len(skip_indices)} near-duplicates")
+
+    return deduplicated
+
+
+def filter_covered_by_history(
+    posts: list[dict],
+    processed_post_texts: dict[str, str],
+    similarity_threshold: float = 0.85,
+) -> tuple[list[dict], list[dict]]:
+    """Split posts into (to_send, covered) based on similarity to previously-processed post texts.
+
+    A post is 'covered' if its text closely matches any stored processed post text,
+    meaning the same event was already sent to Mistral in a prior batch.
+    """
+    if not processed_post_texts or not posts:
+        return posts, []
+
+    to_send: list[dict] = []
+    covered: list[dict] = []
+
+    for post in posts:
+        full_text = _get_post_text(post)
+        if not full_text:
+            to_send.append(post)
+            continue
+
+        matched = False
+        for stored_key, stored_text in processed_post_texts.items():
+            if not stored_text:
+                continue
+            # Compare equal-length prefixes: stored_text is already ≤300 chars,
+            # so truncate the new post to the same length for a fair comparison.
+            compare_len = min(len(full_text), len(stored_text), 300)
+            if compare_len < 50:
+                continue
+            text = full_text[:compare_len]
+            stored = stored_text[:compare_len]
+            sim = _text_similarity(text, stored)
+            if sim >= similarity_threshold:
+                log(f"  [HISTORY-DEDUP] Post {_post_key(post)} matches {stored_key} (sim={sim:.3f}) — skipping")
+                matched = True
+                break
+
+        if matched:
+            covered.append(post)
+        else:
+            to_send.append(post)
+
+    if covered:
+        log(f"History dedup: {len(posts)} posts → {len(to_send)} to send ({len(covered)} already covered by history)")
+
+    return to_send, covered
+
+
 def call_mistral(api_key: str, model: str, prompt: str, user_content: str) -> dict:
     """Send posts to Mistral and parse the structured JSON response."""
     resp = httpx.post(
@@ -238,6 +382,90 @@ def call_mistral(api_key: str, model: str, prompt: str, user_content: str) -> di
     return stories
 
 
+UPDATE_PROMPT = (
+    "You are given a list of pairs. Each pair has a 'new_story' and an 'existing_story' about the same event. "
+    "For each pair, write a SHORT Hebrew update (1-2 sentences) containing ONLY new facts from 'new_story' "
+    "that are NOT already present in 'existing_story'. "
+    "If there are no genuinely new facts, write an empty string for update_text. "
+    'Return ONLY valid JSON: {"updates": [{"index": <i>, "update_text": "<text>"}]}'
+)
+
+
+def check_story_against_history(
+    story: dict,
+    history: list[dict],
+    threshold_duplicate: float = 0.88,
+    threshold_update: float = 0.70,
+) -> tuple[str, int | None]:
+    """Classify a generated story as 'new', 'update', or 'duplicate' vs. history.
+
+    Returns (classification, history_idx_or_None).
+    """
+    text = story.get("text", "")[:400]
+    if not text or len(text) < 30:
+        return "new", None
+
+    best_sim, best_idx = 0.0, None
+    for idx, h in enumerate(history):
+        h_text = h.get("text", "")[:400]
+        if len(h_text) < 30:
+            continue
+        sim = _text_similarity(text, h_text)
+        if sim > best_sim:
+            best_sim, best_idx = sim, idx
+
+    if best_sim >= threshold_duplicate:
+        return "duplicate", best_idx
+    elif best_sim >= threshold_update:
+        return "update", best_idx
+    return "new", None
+
+
+def rewrite_updates_batch(
+    pairs: list[dict],
+    api_key: str,
+    model: str,
+) -> list[dict]:
+    """Single Mistral call to condense all update stories into 'new facts only' text.
+
+    pairs: [{"index": i, "new_story": "...", "existing_story": "..."}, ...]
+    Returns: [{"index": i, "update_text": "..."}, ...]
+    """
+    if not pairs:
+        return []
+
+    resp = httpx.post(
+        "https://api.mistral.ai/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": UPDATE_PROMPT},
+                {"role": "user", "content": json.dumps({"pairs": pairs}, ensure_ascii=False)},
+            ],
+        },
+        timeout=120.0,
+    )
+    if resp.status_code != 200:
+        log(f"Mistral update-rewrite API error: {resp.status_code}", error=True)
+        return []
+
+    data = resp.json()
+    content = data["choices"][0]["message"]["content"].strip()
+    content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        result = json.loads(content)
+        return result.get("updates", [])
+    except json.JSONDecodeError:
+        log("Failed to parse update-rewrite response; keeping original update texts.", error=True)
+        return []
+
+
 def _abs_url(url: str, base_url: str) -> str | None:
     """Convert a media URL to an absolute URL, or return None if unusable."""
     if not url or url.startswith("data:"):
@@ -252,14 +480,23 @@ def _abs_url(url: str, base_url: str) -> str | None:
 def _media_url_fingerprint(url: str) -> str:
     """Extract a stable fingerprint by stripping query params and isolating the path tail."""
     parsed = urlparse(url)
-    return parsed.path.rstrip("/").rsplit("/", 1)[-1]
+    path = parsed.path.rstrip("/")
+    # Extract filename or last 2 path segments for better matching
+    segments = path.split("/")
+    if len(segments) > 1:
+        return "/".join(segments[-2:])
+    return segments[-1] if segments else ""
 
 
 def resolve_media_urls(stories: list[dict], original_posts: list[dict], base_url: str) -> list[dict]:
     """Ensure media_urls in stories contain absolute, deduplicated URLs.
 
     Layer 1 dedup: URL-path fingerprinting catches CDN variants of the same image.
+    Layer 1.5 dedup: Intra-story deduplication removes duplicate URLs within a single story.
+    Layer 1.75 dedup: Cross-story deduplication removes images that appear in multiple stories.
     """
+    global_fingerprints: set[str] = set()
+
     for story in stories:
         resolved = []
         seen_fingerprints: set[str] = set()
@@ -271,9 +508,15 @@ def resolve_media_urls(stories: list[dict], original_posts: list[dict], base_url
             if not abs:
                 return
             fp = _media_url_fingerprint(abs)
-            if fp not in seen_fingerprints:
-                seen_fingerprints.add(fp)
-                resolved.append(abs)
+            # Skip if already seen in this story (intra-story dedup)
+            if fp in seen_fingerprints:
+                return
+            # Skip if already seen in other stories (cross-story dedup)
+            if fp in global_fingerprints:
+                return
+            seen_fingerprints.add(fp)
+            global_fingerprints.add(fp)
+            resolved.append(abs)
 
         for url in story.get("media_urls", []):
             _try_add(url)
@@ -364,9 +607,11 @@ async def post_stories_to_telegram(
     channel: str | int,
     posted_media_hashes: set[str],
 ) -> set[str]:
-    """Post stories to a Telegram channel with three-layer media dedup.
+    """Post stories to a Telegram channel with multi-layer media dedup.
 
     Returns the updated posted_media_hashes set (includes newly posted hashes).
+    - Layer 2: Content-based MD5 dedup (catches same image from different URLs)
+    - Layer 3: Cross-run dedup (posted_media_hashes persisted from previous runs)
     """
     client = await connect_telegram()
     if client is None:
@@ -382,13 +627,15 @@ async def post_stories_to_telegram(
         return posted_media_hashes
 
     run_hashes: set[str] = set()
+    run_content_hashes: set[str] = set()  # Track content hashes within this run
 
     for i, story in enumerate(stories):
         try:
             is_update = story.get("history_index") is not None
-            text = story.get("text", "")
+            story_text = story.get("text", "")
             if is_update:
-                text = "**עדכון**\n\n" + text
+                story_text = "**עדכון**\n\n" + story_text
+            text = wrap_with_divider(story_text)
             caption = text[:1024]
 
             image_buffers = []
@@ -400,9 +647,16 @@ async def post_stories_to_telegram(
                             continue
                         data = resp.content
                         h = hashlib.md5(data).hexdigest()
-                        if h in posted_media_hashes or h in run_hashes:
+                        # Layer 2 dedup: Skip if already downloaded in this run
+                        if h in run_content_hashes:
+                            log(f"  Skipping duplicate image content in run: {url}")
+                            continue
+                        # Layer 3 dedup: Skip if posted in previous runs
+                        if h in posted_media_hashes:
+                            log(f"  Skipping image posted in previous run: {url}")
                             continue
                         run_hashes.add(h)
+                        run_content_hashes.add(h)
                         content_type = resp.headers.get("content-type", "")
                         ext_map = {"image/png": "png", "image/gif": "gif", "image/webp": "webp"}
                         ext = ext_map.get(content_type.split(";")[0].strip(), "jpg")
@@ -455,7 +709,7 @@ async def post_stories_to_telegram(
                     await asyncio.sleep(2)
 
             if not image_buffers and not video_buffers:
-                await client.send_message(entity, text, parse_mode="md")
+                await client.send_message(entity, text, parse_mode="md", link_preview=False)
 
             label = "UPDATE" if is_update else "NEW"
             media_summary = f"{len(image_buffers)} img, {len(video_buffers)} vid"
@@ -626,6 +880,7 @@ def main():
     parser.add_argument("--username", default=os.environ.get("DIGEST_USERNAME", ""), help="Admin username")
     parser.add_argument("--password", default=os.environ.get("DIGEST_PASSWORD", ""), help="Admin password")
     parser.add_argument("--output", default="alternate_digest.html", help="Output HTML file path")
+    parser.add_argument("--no-telegram", action="store_true", help="Skip posting to Telegram channel")
     args = parser.parse_args()
 
     base_url = args.server.rstrip("/")
@@ -664,7 +919,7 @@ def main():
         log("No posts in alternate feed. Nothing to process.")
         sys.exit(0)
 
-    full_history, processed_keys, posted_media_hashes = load_history()
+    full_history, processed_keys, posted_media_hashes, processed_post_texts = load_history()
     full_history.sort(key=lambda s: s.get("updated_at") or s.get("created_at") or "")
     recent_history = full_history[-100:]
     offset = len(full_history) - len(recent_history)
@@ -676,27 +931,83 @@ def main():
     new_posts = [p for p in all_posts if _post_key(p) not in processed_keys]
     log(f"Filtered posts: {len(new_posts)} new out of {len(all_posts)} total ({len(all_posts) - len(new_posts)} already processed).")
 
+    # Deduplicate near-duplicate posts within this batch
+    deduplicate_enabled = config.get("deduplicate_posts", True)
+    if deduplicate_enabled and len(new_posts) > 1:
+        log(f"Running post deduplication on {len(new_posts)} posts...")
+        new_posts = deduplicate_posts(new_posts)
+    elif not deduplicate_enabled:
+        log("Post deduplication is disabled in config.")
+    elif len(new_posts) <= 1:
+        log(f"Skipping within-batch deduplication (only {len(new_posts)} post(s)).")
+
+    # Filter posts whose content is already covered by previously-processed posts
+    if deduplicate_enabled and new_posts and processed_post_texts:
+        log(f"Checking {len(new_posts)} posts against {len(processed_post_texts)} stored post texts...")
+        new_posts, covered_posts = filter_covered_by_history(new_posts, processed_post_texts)
+        if covered_posts:
+            for p in covered_posts:
+                processed_keys.add(_post_key(p))
+                text = _get_post_text(p)
+                if text:
+                    processed_post_texts[_post_key(p)] = text[:300]
+
     if not new_posts:
         log("No new posts to process. Regenerating HTML from existing history.")
+        # Still save keys for any posts filtered as covered by history
+        save_history([], full_history, offset, [], processed_keys, posted_media_hashes, processed_post_texts)
         generate_html(full_history, args.output)
         return
 
     log(f"Preparing {len(new_posts)} new posts for Mistral ({model})...")
     slim = prepare_slim_posts(new_posts)
 
-    user_content = json.dumps(
-        {"new_posts": slim, "previously_generated": recent_history},
-        ensure_ascii=False,
-    )
+    user_content = json.dumps({"new_posts": slim}, ensure_ascii=False)
 
     log("Sending to Mistral AI for analysis...")
     stories = call_mistral(mistral_key, model, prompt, user_content)
+
+    # Classify each story against history: new / update / duplicate
+    final_stories: list[dict] = []
+    update_batch: list[dict] = []  # pairs for the batch rewrite call
+
+    for story in stories:
+        classification, h_idx = check_story_against_history(story, recent_history)
+        if classification == "duplicate":
+            log(f"  [SKIP-DUPLICATE] {_story_preview(story)}")
+        elif classification == "update":
+            log(f"  [UPDATE for #{offset + h_idx}] {_story_preview(story)}")
+            update_batch.append({
+                "batch_pos": len(final_stories),
+                "history_idx": h_idx,
+                "new_story": story["text"],
+                "existing_story": recent_history[h_idx].get("text", ""),
+            })
+            story["history_index"] = offset + h_idx
+            final_stories.append(story)
+        else:
+            log(f"  [NEW] {_story_preview(story)}")
+            final_stories.append(story)
+
+    # Single batch Mistral call to rewrite update texts to "new facts only"
+    if update_batch:
+        log(f"Rewriting {len(update_batch)} update story texts in batch...")
+        pairs = [{"index": u["batch_pos"], "new_story": u["new_story"], "existing_story": u["existing_story"]}
+                 for u in update_batch]
+        rewritten = rewrite_updates_batch(pairs, mistral_key, model)
+        for item in rewritten:
+            pos = item.get("index")
+            new_text = item.get("update_text", "").strip()
+            if pos is not None and 0 <= pos < len(final_stories) and new_text:
+                final_stories[pos]["text"] = new_text
+
+    stories = final_stories
     stories = resolve_media_urls(stories, new_posts, base_url)
 
-    save_history(stories, full_history, offset, new_posts, processed_keys, posted_media_hashes)
+    save_history(stories, full_history, offset, new_posts, processed_keys, posted_media_hashes, processed_post_texts)
 
     tg_channel = os.environ.get("DIGEST_TELEGRAM_CHANNEL", "")
-    if POST_TO_CHANNEL and tg_channel and stories:
+    if POST_TO_CHANNEL and tg_channel and stories and not args.no_telegram:
         if tg_channel.lstrip("-").isdigit():
             tg_channel = int(tg_channel)
         if POST_VIDEOS:
@@ -710,7 +1021,9 @@ def main():
         posted_media_hashes = asyncio.run(
             post_stories_to_telegram(stories, tg_channel, posted_media_hashes)
         )
-        save_history([], full_history, offset, [], processed_keys, posted_media_hashes)
+        save_history([], full_history, offset, [], processed_keys, posted_media_hashes, processed_post_texts)
+    elif args.no_telegram:
+        log("--no-telegram flag supplied; skipping Telegram posting.")
     elif not POST_TO_CHANNEL:
         log("POST_TO_CHANNEL is disabled; skipping Telegram posting.")
     elif not tg_channel:
