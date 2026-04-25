@@ -1171,6 +1171,35 @@ async def track_share(request: Request, user: dict = Depends(require_auth)):
     return {"status": "success"}
 
 
+@app.post("/api/admin/share-to-channel")
+async def share_to_channel(request: Request, user: dict = Depends(require_auth)):
+    if user["user_id"] != 1:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    channel = os.environ.get("DIGEST_TELEGRAM_CHANNEL")
+    if not channel:
+        raise HTTPException(status_code=503, detail="DIGEST_TELEGRAM_CHANNEL not configured")
+    tg: TelegramClient | None = request.app.state.telegram
+    if not tg:
+        raise HTTPException(status_code=503, detail="Telegram client not available")
+    body = await request.json()
+    post_channel = body.get("post_channel", "")
+    post_id = body.get("post_id", "")
+    if not post_channel or not post_id:
+        raise HTTPException(status_code=400, detail="post_channel and post_id are required")
+    try:
+        target = await tg.get_entity(channel)
+        source = int(post_channel) if str(post_channel).lstrip("-").isdigit() else post_channel
+        await tg.forward_messages(target, messages=[int(post_id)], from_peer=source)
+        logger.info(
+            "User '%s' forwarded post to Telegram channel '%s' (from=%s/%s)",
+            user["user_name"], channel, post_channel, post_id,
+        )
+        return {"status": "success"}
+    except Exception as e:
+        logger.error("Failed to forward to Telegram channel: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to forward: {e}")
+
+
 @app.get("/api/admin/config")
 async def get_full_config(user: dict = Depends(require_auth)):
     if user.get("user_id") != 1:
