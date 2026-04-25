@@ -32,3 +32,8 @@ digest_history.json
 util.bat
 generate_alternate_digest.py.orig
 digest.log
+test_alternate_digest.html
+generate_alternate_digest.py.1
+test_digest_history.json
+
+
