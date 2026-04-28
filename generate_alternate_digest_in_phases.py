@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
-"""Fetch alternate-feed posts, process through Mistral AI, generate HTML digest,
-and optionally post new stories to a Telegram channel.
+"""Phased variant of the alternate-feed digest generator.
+
+Differs from test_generate_alternate_digest.py by running the LLM in two phases:
+  Phase 1: extract stories in batches of `channel_phase1_batch_size` posts each,
+           up to `channel_max_posts_per_call` total posts.
+  Phase 2: send the union of stories from all batches back to the LLM for a
+           single consolidation pass that dedupes across batches and re-ranks.
+  Phase 3: post only the consolidated stories to the Telegram channel.
 
 Usage:
-    python generate_alternate_digest.py
+    python generate_alternate_digest_in_phases.py
 
 Environment variables (from .env or shell):
     DIGEST_SERVER_URL       – base URL of the TelegramUpdates server
     DIGEST_USERNAME         – admin username for login
     DIGEST_PASSWORD         – admin password for login
-    MISTRAL_API_KEY         – Mistral API key
+    MISTRAL_API_KEY         – Mistral API key (when channel_ai_provider=mistral)
+    NVIDIA_API_KEY          – NVIDIA NIM API key (when channel_ai_provider=nim)
     DIGEST_TELEGRAM_CHANNEL – target Telegram channel (@username or numeric ID)
     TELEGRAM_API_ID         – Telegram API ID (for posting)
     TELEGRAM_API_HASH       – Telegram API hash (for posting)
@@ -152,6 +159,7 @@ def build_provider(config: dict) -> AIProvider:
 
 
 PROMPT_PATH = Path(__file__).parent / "alternate_feed_prompt.md"
+CONSOLIDATION_PROMPT_PATH = Path(__file__).parent / "alternate_feed_consolidation_prompt.md"
 CONFIG_PATH = Path(__file__).parent / "config.json"
 HISTORY_PATH = Path(__file__).parent / "digest_history.json"
 
@@ -159,11 +167,11 @@ HISTORY_PATH = Path(__file__).parent / "digest_history.json"
 POST_TO_CHANNEL = True   # Post stories to the Telegram channel (requires DIGEST_TELEGRAM_CHANNEL env var)
 POST_VIDEOS = True      # Download and post videos from source posts
 
-DIVIDER = "\u200e                         "
+DIVIDER = "\u200e                         ── · ──"
 
 
 def wrap_with_divider(text: str) -> str:
-    return f"{text}\n\n{DIVIDER}\n\n\n\n\u200b"
+    return f"{DIVIDER}\n\n{text}\n\n{DIVIDER}\n\n\n\n\u200b"
 
 
 def log(msg: str, error: bool = False) -> None:
@@ -326,6 +334,20 @@ def prepare_slim_posts(posts: list[dict], limit: int = 100) -> list[dict]:
     return slim
 
 
+def slim_batch_with_global_indices(new_posts: list[dict], start: int, end: int) -> list[dict]:
+    """Slim new_posts[start:end] but set 'i' to the GLOBAL index in new_posts.
+
+    Phase 1 batches each see a slice of new_posts. We re-stamp the 'i' field so
+    every story's source_indices already references the global position in
+    new_posts, which is what resolve_media_urls expects after Phase 2.
+    """
+    sliced = new_posts[start:end]
+    slim = prepare_slim_posts(sliced, limit=len(sliced))
+    for offset, entry in enumerate(slim):
+        entry["i"] = start + offset
+    return slim
+
+
 def _get_post_text(post: dict) -> str:
     """Extract plain text from a post for comparison, stripping HTML if needed."""
     text = post.get("text_plain", "")
@@ -343,11 +365,7 @@ def _text_similarity(text1: str, text2: str) -> float:
 
 
 def deduplicate_posts(posts: list[dict], similarity_threshold: float = 0.85) -> list[dict]:
-    """Remove near-duplicate posts within a batch, keeping the most complete version.
-
-    Uses substring containment + fuzzy matching to detect duplicates.
-    Returns deduplicated list and logs removed duplicates.
-    """
+    """Remove near-duplicate posts within a batch, keeping the most complete version."""
     if not posts:
         return posts
 
@@ -370,22 +388,18 @@ def deduplicate_posts(posts: list[dict], similarity_threshold: float = 0.85) -> 
 
             text_j = _get_text(post_j)
 
-            # Check substring containment (one is mostly contained in the other)
             if len(text_i) > 0 and len(text_j) > 0:
                 min_len = min(len(text_i), len(text_j))
                 max_len = max(len(text_i), len(text_j))
                 ratio = min_len / max_len
 
-                # If one is >80% contained in the other, they're likely duplicates
                 if ratio > 0.80:
-                    # Also check fuzzy similarity
                     similarity = _text_similarity(text_i, text_j)
                     log(f"  [DEBUG] Comparing posts {i} vs {j}: len_ratio={ratio:.1%}, similarity={similarity:.4f}")
                     if similarity > similarity_threshold:
                         log(f"    → MATCH! Marking post {j} as duplicate")
                         duplicates.append(j)
                         skip_indices.add(j)
-                        # Keep the longer post as the "source"
                         if len(text_j) > len(text_i):
                             kept_post = post_j
                             text_i = text_j
@@ -406,11 +420,7 @@ def filter_covered_by_history(
     processed_post_texts: dict[str, str],
     similarity_threshold: float = 0.85,
 ) -> tuple[list[dict], list[dict]]:
-    """Split posts into (to_send, covered) based on similarity to previously-processed post texts.
-
-    A post is 'covered' if its text closely matches any stored processed post text,
-    meaning the same event was already sent to Mistral in a prior batch.
-    """
+    """Split posts into (to_send, covered) based on similarity to previously-processed post texts."""
     if not processed_post_texts or not posts:
         return posts, []
 
@@ -427,8 +437,6 @@ def filter_covered_by_history(
         for stored_key, stored_text in processed_post_texts.items():
             if not stored_text:
                 continue
-            # Compare equal-length prefixes: stored_text is already ≤300 chars,
-            # so truncate the new post to the same length for a fair comparison.
             compare_len = min(len(full_text), len(stored_text), 300)
             if compare_len < 50:
                 continue
@@ -487,10 +495,7 @@ def check_story_against_history(
     threshold_duplicate: float = 0.88,
     threshold_update: float = 0.70,
 ) -> tuple[str, int | None]:
-    """Classify a generated story as 'new', 'update', or 'duplicate' vs. history.
-
-    Returns (classification, history_idx_or_None).
-    """
+    """Classify a generated story as 'new', 'update', or 'duplicate' vs. history."""
     text = story.get("text", "")[:400]
     if not text or len(text) < 30:
         return "new", None
@@ -515,11 +520,7 @@ def rewrite_updates_batch(
     pairs: list[dict],
     provider: AIProvider,
 ) -> list[dict]:
-    """Single AI provider call to condense all update stories into 'new facts only' text.
-
-    pairs: [{"index": i, "new_story": "...", "existing_story": "..."}, ...]
-    Returns: [{"index": i, "update_text": "..."}, ...]
-    """
+    """Single AI provider call to condense all update stories into 'new facts only' text."""
     if not pairs:
         return []
 
@@ -553,7 +554,6 @@ def _media_url_fingerprint(url: str) -> str:
     """Extract a stable fingerprint by stripping query params and isolating the path tail."""
     parsed = urlparse(url)
     path = parsed.path.rstrip("/")
-    # Extract filename or last 2 path segments for better matching
     segments = path.split("/")
     if len(segments) > 1:
         return "/".join(segments[-2:])
@@ -561,12 +561,7 @@ def _media_url_fingerprint(url: str) -> str:
 
 
 def resolve_media_urls(stories: list[dict], original_posts: list[dict], base_url: str) -> list[dict]:
-    """Ensure media_urls in stories contain absolute, deduplicated URLs.
-
-    Layer 1 dedup: URL-path fingerprinting catches CDN variants of the same image.
-    Layer 1.5 dedup: Intra-story deduplication removes duplicate URLs within a single story.
-    Layer 1.75 dedup: Cross-story deduplication removes images that appear in multiple stories.
-    """
+    """Ensure media_urls in stories contain absolute, deduplicated URLs."""
     global_fingerprints: set[str] = set()
 
     for story in stories:
@@ -625,16 +620,12 @@ async def scrape_video_cdn_url(channel: str, post_id: str) -> str | None:
 
 
 async def resolve_video_urls(stories: list[dict], original_posts: list[dict]) -> list[dict]:
-    """Collect CDN video URLs for source posts that have video.
-
-    Populates a 'video_urls' list on each story (separate from media_urls).
-    Only works for public channels; private channel videos are skipped.
-    """
-    global_seen_urls: set[str] = set()  # Level 2: cross-story URL dedup
+    """Collect CDN video URLs for source posts that have video."""
+    global_seen_urls: set[str] = set()
     for story in stories:
         video_urls: list[str] = []
         seen: set[str] = set()
-        seen_urls: set[str] = set()  # Level 1: within-story URL dedup
+        seen_urls: set[str] = set()
         for idx in story.get("source_indices", []):
             if not (0 <= idx < len(original_posts)):
                 continue
@@ -689,12 +680,7 @@ async def post_stories_to_telegram(
     channel: str | int,
     posted_media_hashes: set[str],
 ) -> set[str]:
-    """Post stories to a Telegram channel with multi-layer media dedup.
-
-    Returns the updated posted_media_hashes set (includes newly posted hashes).
-    - Layer 2: Content-based MD5 dedup (catches same image from different URLs)
-    - Layer 3: Cross-run dedup (posted_media_hashes persisted from previous runs)
-    """
+    """Post stories to a Telegram channel with multi-layer media dedup."""
     client = await connect_telegram()
     if client is None:
         log("Telegram credentials missing; skipping channel posting.", error=True)
@@ -709,8 +695,8 @@ async def post_stories_to_telegram(
         return posted_media_hashes
 
     run_hashes: set[str] = set()
-    run_content_hashes: set[str] = set()  # Track content hashes within this run
-    run_video_urls: set[str] = set()  # Level 3: URL dedup safety net across stories
+    run_content_hashes: set[str] = set()
+    run_video_urls: set[str] = set()
 
     for i, story in enumerate(stories):
         try:
@@ -730,11 +716,9 @@ async def post_stories_to_telegram(
                             continue
                         data = resp.content
                         h = hashlib.md5(data).hexdigest()
-                        # Layer 2 dedup: Skip if already downloaded in this run
                         if h in run_content_hashes:
                             log(f"  Skipping duplicate image content in run: {url}")
                             continue
-                        # Layer 3 dedup: Skip if posted in previous runs
                         if h in posted_media_hashes:
                             log(f"  Skipping image posted in previous run: {url}")
                             continue
@@ -966,7 +950,7 @@ def generate_html(stories: list[dict], output_path: str) -> None:
 def main():
     global HISTORY_PATH
 
-    parser = argparse.ArgumentParser(description="Generate an alternate-feed digest via Mistral AI.")
+    parser = argparse.ArgumentParser(description="Generate a phased alternate-feed digest.")
     parser.add_argument("--server", default=os.environ.get("DIGEST_SERVER_URL", ""), help="Server base URL")
     parser.add_argument("--username", default=os.environ.get("DIGEST_USERNAME", ""), help="Admin username")
     parser.add_argument("--password", default=os.environ.get("DIGEST_PASSWORD", ""), help="Admin password")
@@ -997,12 +981,21 @@ def main():
 
     config = load_config()
     provider = build_provider(config)
-    max_posts_per_call = int(config.get("channel_max_posts_per_call", 100))
+    total_cap = int(config.get("channel_max_posts_per_call", 100))
+    batch_size = int(config.get("channel_phase1_batch_size", 50))
+    if batch_size <= 0:
+        log(f"Invalid channel_phase1_batch_size {batch_size}; falling back to 50.", error=True)
+        batch_size = 50
 
     try:
         prompt = PROMPT_PATH.read_text(encoding="utf-8")
     except FileNotFoundError:
         log(f"Error: prompt file not found at {PROMPT_PATH}", error=True)
+        sys.exit(1)
+    try:
+        consol_prompt = CONSOLIDATION_PROMPT_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        log(f"Error: consolidation prompt file not found at {CONSOLIDATION_PROMPT_PATH}", error=True)
         sys.exit(1)
 
     log(f"Logging in to {base_url} as {username}...")
@@ -1026,7 +1019,6 @@ def main():
     new_posts = [p for p in all_posts if _post_key(p) not in processed_keys]
     log(f"Filtered posts: {len(new_posts)} new out of {len(all_posts)} total ({len(all_posts) - len(new_posts)} already processed).")
 
-    # Deduplicate near-duplicate posts within this batch
     deduplicate_enabled = config.get("deduplicate_posts", True)
     if deduplicate_enabled and len(new_posts) > 1:
         log(f"Running post deduplication on {len(new_posts)} posts...")
@@ -1036,7 +1028,6 @@ def main():
     elif len(new_posts) <= 1:
         log(f"Skipping within-batch deduplication (only {len(new_posts)} post(s)).")
 
-    # Filter posts whose content is already covered by previously-processed posts
     if deduplicate_enabled and new_posts and processed_post_texts:
         log(f"Checking {len(new_posts)} posts against {len(processed_post_texts)} stored post texts...")
         new_posts, covered_posts = filter_covered_by_history(new_posts, processed_post_texts)
@@ -1049,43 +1040,68 @@ def main():
 
     if not new_posts:
         log("No new posts to process. Regenerating HTML from existing history.")
-        # Still save keys for any posts filtered as covered by history
         save_history([], full_history, offset, [], processed_keys, posted_media_hashes, processed_post_texts)
         generate_html(full_history, args.output)
         return
 
-    sent_count = min(len(new_posts), max_posts_per_call)
-    log(f"Preparing {sent_count} of {len(new_posts)} new posts for {type(provider).__name__} ({provider.model}) [cap={max_posts_per_call}]...")
-    slim = prepare_slim_posts(new_posts, limit=max_posts_per_call)
+    candidate_count = min(len(new_posts), total_cap)
+    log(f"Phased run: {candidate_count} of {len(new_posts)} new posts in batches of {batch_size} "
+        f"[cap={total_cap}] using {type(provider).__name__} ({provider.model})")
 
-    user_content = json.dumps({"new_posts": slim}, ensure_ascii=False)
+    # ---------- Phase 1: per-batch extraction ----------
+    phase1_stories: list[dict] = []
+    for start in range(0, candidate_count, batch_size):
+        end = min(start + batch_size, candidate_count)
+        slim = slim_batch_with_global_indices(new_posts, start, end)
+        user_payload = json.dumps({"new_posts": slim}, ensure_ascii=False)
+        log(f"  [Phase 1] batch {start}-{end - 1}: sending {len(slim)} posts...")
+        batch_stories = call_provider(provider, prompt, user_payload)
+        log(f"  [Phase 1] batch {start}-{end - 1}: got {len(batch_stories)} stories")
+        phase1_stories.extend(batch_stories)
 
-    log(f"Sending to {type(provider).__name__} for analysis...")
-    stories = call_provider(provider, prompt, user_content)
+    log(f"[Phase 1] total: {len(phase1_stories)} stories across {((candidate_count - 1) // batch_size) + 1} batch(es)")
 
-    # Classify each story against history: new / update / duplicate
-    final_stories: list[dict] = []
-    update_batch: list[dict] = []  # pairs for the batch rewrite call
+    # ---------- Phase 2: cross-batch consolidation ----------
+    if not phase1_stories:
+        log("[Phase 2] no Phase 1 stories to consolidate; skipping.")
+        final_stories: list[dict] = []
+    else:
+        consolidation_input = [
+            {
+                "text": s.get("text", ""),
+                "importance": s.get("importance", 99),
+                "media_urls": s.get("media_urls", []) or [],
+                "source_indices": s.get("source_indices", []) or [],
+            }
+            for s in phase1_stories
+        ]
+        consolidation_payload = json.dumps({"stories": consolidation_input}, ensure_ascii=False)
+        log(f"[Phase 2] consolidating {len(consolidation_input)} stories...")
+        final_stories = call_provider(provider, consol_prompt, consolidation_payload)
+        log(f"[Phase 2] got {len(final_stories)} consolidated stories")
 
-    for story in stories:
+    # ---------- Classify against history (new / update / duplicate) ----------
+    classified_stories: list[dict] = []
+    update_batch: list[dict] = []
+
+    for story in final_stories:
         classification, h_idx = check_story_against_history(story, recent_history)
         if classification == "duplicate":
             log(f"  [SKIP-DUPLICATE] {_story_preview(story)}")
         elif classification == "update":
             log(f"  [UPDATE for #{offset + h_idx}] {_story_preview(story)}")
             update_batch.append({
-                "batch_pos": len(final_stories),
+                "batch_pos": len(classified_stories),
                 "history_idx": h_idx,
                 "new_story": story["text"],
                 "existing_story": recent_history[h_idx].get("text", ""),
             })
             story["history_index"] = offset + h_idx
-            final_stories.append(story)
+            classified_stories.append(story)
         else:
             log(f"  [NEW] {_story_preview(story)}")
-            final_stories.append(story)
+            classified_stories.append(story)
 
-    # Single batch Mistral call to rewrite update texts to "new facts only"
     if update_batch:
         log(f"Rewriting {len(update_batch)} update story texts in batch...")
         pairs = [{"index": u["batch_pos"], "new_story": u["new_story"], "existing_story": u["existing_story"]}
@@ -1094,10 +1110,10 @@ def main():
         for item in rewritten:
             pos = item.get("index")
             new_text = item.get("update_text", "").strip()
-            if pos is not None and 0 <= pos < len(final_stories) and new_text:
-                final_stories[pos]["text"] = new_text
+            if pos is not None and 0 <= pos < len(classified_stories) and new_text:
+                classified_stories[pos]["text"] = new_text
 
-    stories = final_stories
+    stories = classified_stories
     stories = resolve_media_urls(stories, new_posts, base_url)
 
     save_history(stories, full_history, offset, new_posts, processed_keys, posted_media_hashes, processed_post_texts)

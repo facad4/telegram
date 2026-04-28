@@ -7,9 +7,13 @@
   "alternate_feed_max_posts": 300,
   "ai_provider": "mistral",
   "ai_model": "mistral-large-latest",
+  "channel_ai_provider": "nim",
+  "channel_ai_model": "z-ai/glm-5.1",
+  "channel_max_posts_per_call": 100,
+  "channel_phase1_batch_size": 50,
   "context_provider": "mistral",
   "context_mistral_model": "mistral-large-latest",
   "context_tavily_depth": "advanced",
   "context_tavily_max_results": 5,
   "deduplicate_posts": true
-}
+} 
