@@ -7,3 +7,4 @@ telethon
 tavily-python
 google-genai
 pyjwt
+playwright

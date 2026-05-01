@@ -106,6 +106,7 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
   - Channel name and avatar (`channel_title` and `channel_photo`)
   - Media photos (`photo_url` from `.tgme_widget_message_photo_wrap` style attribute)
   - Video thumbnails (`video_thumb` from `.tgme_widget_message_video_thumb`)
+  - **Video preview suppression**: When both elements are present in the same message, `photo_url` is cleared. In that case the photo wrap is just the video's still preview, not a separate companion image, and downstream consumers (e.g. the digest pipeline) would otherwise attach it as a duplicate image alongside the video.
   - Link previews (title, description, URL, image from `.tgme_widget_message_link_preview`)
 - **No caching**: Fresh data on every request
 - **Concurrency**: `asyncio.gather()` for simultaneous channel fetching

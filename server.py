@@ -329,6 +329,12 @@ def parse_channel_posts(html: str, channel: str) -> list[dict]:
         if video_thumb_el and video_thumb_el.get("style"):
             video_thumb = extract_image_url(video_thumb_el["style"])
 
+        # When the message has a video, the photo wrap (if any) is just the
+        # video's still preview. Drop it so downstream consumers don't attach
+        # the still as a separate image alongside the video.
+        if video_thumb is not None:
+            photo_url = None
+
         link_preview = None
         lp_el = msg.select_one(".tgme_widget_message_link_preview")
         if lp_el:

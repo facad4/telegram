@@ -25,6 +25,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -40,6 +41,116 @@ if sys.stdout.encoding != "utf-8":
     sys.stderr.reconfigure(encoding="utf-8")
 load_dotenv()
 
+
+def _log_err(msg: str) -> None:
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {msg}", file=sys.stderr)
+
+
+class AIProvider:
+    """Base class for OpenAI-compatible chat-completion providers returning JSON."""
+    BASE_URL = ""
+    SUPPORTS_JSON_RESPONSE_FORMAT = True
+
+    def __init__(self, api_key: str, model: str):
+        self.api_key = api_key
+        self.model = model
+
+    def chat_json(self, system_prompt: str, user_content: str,
+                  temperature: float = 0.2, timeout: float = 300.0) -> str:
+        if not self.api_key:
+            _log_err(f"Error: API key for {type(self).__name__} is empty.")
+            sys.exit(1)
+        body = {
+            "model": self.model,
+            "temperature": temperature,
+            "stream": True,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+        }
+        if self.SUPPORTS_JSON_RESPONSE_FORMAT:
+            body["response_format"] = {"type": "json_object"}
+
+        timeout_obj = httpx.Timeout(timeout, connect=30.0, read=timeout, write=60.0, pool=30.0)
+        transient_status = {500, 502, 503, 504}
+        transient_excs = (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectError, httpx.ReadError)
+        backoff = [5, 15, 30]
+        last_error = ""
+        provider_name = type(self).__name__
+
+        for attempt in range(len(backoff) + 1):
+            try:
+                chunks: list[str] = []
+                with httpx.stream(
+                    "POST",
+                    f"{self.BASE_URL}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "Accept": "text/event-stream",
+                    },
+                    json=body,
+                    timeout=timeout_obj,
+                ) as resp:
+                    if resp.status_code in transient_status:
+                        err_body = resp.read().decode(errors="replace")
+                        last_error = f"HTTP {resp.status_code}: {err_body[:300]}"
+                        raise httpx.RemoteProtocolError(last_error)
+                    if resp.status_code != 200:
+                        err_body = resp.read().decode(errors="replace")
+                        _log_err(f"{provider_name} API error (HTTP {resp.status_code}): {err_body[:500]}")
+                        sys.exit(1)
+                    for line in resp.iter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            break
+                        try:
+                            event = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = event.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta") or {}
+                        piece = delta.get("content")
+                        if piece:
+                            chunks.append(piece)
+                return "".join(chunks).strip()
+            except transient_excs as e:
+                last_error = last_error or f"{type(e).__name__}: {e}"
+                if attempt >= len(backoff):
+                    _log_err(f"{provider_name} transient failure after {attempt + 1} attempts: {last_error}")
+                    sys.exit(1)
+                wait = backoff[attempt]
+                _log_err(f"{provider_name} transient failure ({last_error}); retrying in {wait}s (attempt {attempt + 2}/{len(backoff) + 1})...")
+                time.sleep(wait)
+                last_error = ""
+        return ""
+
+
+class MistralProvider(AIProvider):
+    BASE_URL = "https://api.mistral.ai/v1"
+
+
+class NIMProvider(AIProvider):
+    BASE_URL = "https://integrate.api.nvidia.com/v1"
+    SUPPORTS_JSON_RESPONSE_FORMAT = False
+
+
+def build_provider(config: dict) -> AIProvider:
+    name = (config.get("channel_ai_provider") or "mistral").lower()
+    model = config.get("channel_ai_model")
+    if name == "nim":
+        return NIMProvider(os.environ.get("NVIDIA_API_KEY", ""), model or "z-ai/glm-5.1")
+    if name == "mistral":
+        return MistralProvider(os.environ.get("MISTRAL_API_KEY", ""), model or "mistral-large-latest")
+    raise ValueError(f"Unknown channel_ai_provider: {name!r}")
+
+
 PROMPT_PATH = Path(__file__).parent / "alternate_feed_prompt.md"
 CONFIG_PATH = Path(__file__).parent / "config.json"
 HISTORY_PATH = Path(__file__).parent / "digest_history.json"
@@ -48,11 +159,11 @@ HISTORY_PATH = Path(__file__).parent / "digest_history.json"
 POST_TO_CHANNEL = True   # Post stories to the Telegram channel (requires DIGEST_TELEGRAM_CHANNEL env var)
 POST_VIDEOS = True      # Download and post videos from source posts
 
-DIVIDER = "\u200e                         ── · ──"
+DIVIDER = "\u200e                         "
 
 
 def wrap_with_divider(text: str) -> str:
-    return f"{DIVIDER}\n\n{text}\n\n{DIVIDER}\n\n\n\n\u200b"
+    return f"{text}\n\n{DIVIDER}\n\n\n\n\u200b"
 
 
 def log(msg: str, error: bool = False) -> None:
@@ -185,10 +296,10 @@ def fetch_alternate_posts(base_url: str, token: str) -> list[dict]:
     return posts
 
 
-def prepare_slim_posts(posts: list[dict]) -> list[dict]:
+def prepare_slim_posts(posts: list[dict], limit: int = 100) -> list[dict]:
     """Strip heavy fields and compute engagement ratios for LLM input."""
     slim = []
-    for i, p in enumerate(posts[:100]):
+    for i, p in enumerate(posts[:limit]):
         views_raw = re.sub(r"[^\d]", "", p.get("views", "0")) or "0"
         views_num = int(views_raw)
         subs = p.get("channel_subscribers") or 0
@@ -340,43 +451,22 @@ def filter_covered_by_history(
     return to_send, covered
 
 
-def call_mistral(api_key: str, model: str, prompt: str, user_content: str) -> dict:
-    """Send posts to Mistral and parse the structured JSON response."""
-    resp = httpx.post(
-        "https://api.mistral.ai/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "temperature": 0.2,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": user_content},
-            ],
-        },
-        timeout=300.0,
-    )
-    if resp.status_code != 200:
-        log(f"Mistral API error (HTTP {resp.status_code}): {resp.text[:500]}", error=True)
-        sys.exit(1)
-
-    data = resp.json()
-    content = data["choices"][0]["message"]["content"].strip()
+def call_provider(provider: AIProvider, prompt: str, user_content: str) -> list:
+    """Send posts to the AI provider and parse the structured JSON response."""
+    name = type(provider).__name__
+    content = provider.chat_json(prompt, user_content, temperature=0.2, timeout=900.0)
     content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
 
     try:
         result = json.loads(content)
     except json.JSONDecodeError as e:
-        log(f"Failed to parse Mistral response: {e}", error=True)
+        log(f"Failed to parse {name} response: {e}", error=True)
         log(f"Raw content: {content[:1000]}", error=True)
         sys.exit(1)
 
     stories = result.get("stories", result if isinstance(result, list) else [])
     if not isinstance(stories, list):
-        log("Mistral returned invalid stories format.", error=True)
+        log(f"{name} returned invalid stories format.", error=True)
         sys.exit(1)
 
     return stories
@@ -423,10 +513,9 @@ def check_story_against_history(
 
 def rewrite_updates_batch(
     pairs: list[dict],
-    api_key: str,
-    model: str,
+    provider: AIProvider,
 ) -> list[dict]:
-    """Single Mistral call to condense all update stories into 'new facts only' text.
+    """Single AI provider call to condense all update stories into 'new facts only' text.
 
     pairs: [{"index": i, "new_story": "...", "existing_story": "..."}, ...]
     Returns: [{"index": i, "update_text": "..."}, ...]
@@ -434,29 +523,12 @@ def rewrite_updates_batch(
     if not pairs:
         return []
 
-    resp = httpx.post(
-        "https://api.mistral.ai/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": UPDATE_PROMPT},
-                {"role": "user", "content": json.dumps({"pairs": pairs}, ensure_ascii=False)},
-            ],
-        },
-        timeout=120.0,
+    content = provider.chat_json(
+        UPDATE_PROMPT,
+        json.dumps({"pairs": pairs}, ensure_ascii=False),
+        temperature=0.1,
+        timeout=600.0,
     )
-    if resp.status_code != 200:
-        log(f"Mistral update-rewrite API error: {resp.status_code}", error=True)
-        return []
-
-    data = resp.json()
-    content = data["choices"][0]["message"]["content"].strip()
     content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
         result = json.loads(content)
@@ -923,13 +995,9 @@ def main():
         log("Error: username and password required (--username/--password or DIGEST_USERNAME/DIGEST_PASSWORD env vars).", error=True)
         sys.exit(1)
 
-    mistral_key = os.environ.get("MISTRAL_API_KEY", "")
-    if not mistral_key:
-        log("Error: MISTRAL_API_KEY environment variable required.", error=True)
-        sys.exit(1)
-
     config = load_config()
-    model = config.get("context_mistral_model", "mistral-large-latest")
+    provider = build_provider(config)
+    max_posts_per_call = int(config.get("channel_max_posts_per_call", 100))
 
     try:
         prompt = PROMPT_PATH.read_text(encoding="utf-8")
@@ -951,7 +1019,7 @@ def main():
     recent_history = full_history[-100:]
     offset = len(full_history) - len(recent_history)
     if full_history:
-        log(f"Loaded {len(full_history)} stories from history (sending last {len(recent_history)} to Mistral, sorted by recency).")
+        log(f"Loaded {len(full_history)} stories from history (using last {len(recent_history)} for local dedup; history is NOT sent to the LLM).")
     else:
         log("No history found — first run.")
 
@@ -986,13 +1054,14 @@ def main():
         generate_html(full_history, args.output)
         return
 
-    log(f"Preparing {len(new_posts)} new posts for Mistral ({model})...")
-    slim = prepare_slim_posts(new_posts)
+    sent_count = min(len(new_posts), max_posts_per_call)
+    log(f"Preparing {sent_count} of {len(new_posts)} new posts for {type(provider).__name__} ({provider.model}) [cap={max_posts_per_call}]...")
+    slim = prepare_slim_posts(new_posts, limit=max_posts_per_call)
 
     user_content = json.dumps({"new_posts": slim}, ensure_ascii=False)
 
-    log("Sending to Mistral AI for analysis...")
-    stories = call_mistral(mistral_key, model, prompt, user_content)
+    log(f"Sending to {type(provider).__name__} for analysis...")
+    stories = call_provider(provider, prompt, user_content)
 
     # Classify each story against history: new / update / duplicate
     final_stories: list[dict] = []
@@ -1021,7 +1090,7 @@ def main():
         log(f"Rewriting {len(update_batch)} update story texts in batch...")
         pairs = [{"index": u["batch_pos"], "new_story": u["new_story"], "existing_story": u["existing_story"]}
                  for u in update_batch]
-        rewritten = rewrite_updates_batch(pairs, mistral_key, model)
+        rewritten = rewrite_updates_batch(pairs, provider)
         for item in rewritten:
             pos = item.get("index")
             new_text = item.get("update_text", "").strip()
