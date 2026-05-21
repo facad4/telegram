@@ -8,8 +8,8 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - **Database**: Supabase (PostgreSQL) via async Python SDK, encapsulated in `database.py`
 - **Frontend**: Single-page vanilla HTML/CSS/JavaScript application (`static/index.html`) with auto-scrolling tiles
 - **Configuration**: `config.json` for global settings; per-user channel feeds stored in Supabase `Feeds` table
-- **Environment**: `.env` file for secrets (`SUPABASE_URL`, `SUPABASE_KEY`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION`, `GROK_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, `TAVILY_API_KEY`) loaded via `python-dotenv`
-- **Dependencies**: FastAPI, httpx, BeautifulSoup4, supabase, python-dotenv, telethon (see `requirements.txt`)
+- **Environment**: `.env` file for secrets (`SUPABASE_URL`, `SUPABASE_KEY`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION`, `GROK_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, `TAVILY_API_KEY`, `NVIDIA_API_KEY`, `TELEGRAM_BOT_TOKEN`) loaded via `python-dotenv`
+- **Dependencies**: FastAPI, httpx, BeautifulSoup4, supabase, python-dotenv, telethon, google-genai, pyjwt, tavily-python, playwright (see `requirements.txt`)
 
 ## Core Features
 
@@ -64,26 +64,38 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - Contains only global settings (no channel lists):
   ```json
   {
-    "refresh_interval_minutes": 5,
+    "refresh_interval_minutes": 60,
     "max_posts": 100,
+    "fetch_per_channel": 50,
     "scroll_speed": 50,
     "media_concurrency": 20,
-    "ai_provider": "gemini",
-    "ai_model": "gemini-2.5-flash",
-    "context_provider": "gemini",
+    "alternate_feed_max_posts": 300,
+    "ai_provider": "mistral",
+    "ai_model": "mistral-large-latest",
+    "channel_ai_provider": "nim",
+    "channel_ai_model": "z-ai/glm-5.1",
+    "channel_max_posts_per_call": 100,
+    "channel_phase1_batch_size": 50,
+    "context_provider": "mistral",
     "context_mistral_model": "mistral-large-latest",
-    "context_tavily_depth": "basic",
+    "context_tavily_depth": "advanced",
     "context_tavily_max_results": 5,
-    "alternate_feed_max_posts": 100
+    "deduplicate_posts": true
   }
   ```
 - **Settings**:
   - `refresh_interval_minutes`: Auto-refresh interval for main feed (1-60 minutes)
   - `max_posts`: Maximum posts to display in main feed (5-100)
+  - `fetch_per_channel`: Number of posts fetched per channel per request (default 50)
   - `scroll_speed`: Auto-scroll speed in pixels/second (10-200)
   - `media_concurrency`: Concurrent media downloads (1-20)
   - `ai_provider`: AI provider for Top 10 ranking - "gemini", "mistral", or "groq"
   - `ai_model`: Model name for the selected AI provider
+  - `channel_ai_provider`: AI provider for the alternate feed digest script - "mistral" or "nim" (NVIDIA Inference Microservices)
+  - `channel_ai_model`: Model name for the channel digest AI provider (e.g., `"z-ai/glm-5.1"` for NIM, `"mistral-large-latest"` for Mistral)
+  - `channel_max_posts_per_call`: Maximum posts sent to the AI per call in the digest pipeline (default 100)
+  - `channel_phase1_batch_size`: Phase 1 batch size for digest processing (default 50)
+  - `deduplicate_posts`: Enable fuzzy deduplication of incoming posts before sending to the AI (default `true`)
   - `context_provider`: Context search provider for "More" button - "gemini" or "mistral"
   - `context_mistral_model`: Mistral model for context search (when `context_provider` is "mistral")
   - `context_tavily_depth`: Tavily search depth - "basic" or "advanced" (when `context_provider` is "mistral")
@@ -117,13 +129,23 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - **Method**: `fetch_private_channel_posts(tg_client, channel_id, limit)` uses Telethon's `get_messages()` to fetch recent messages from private channels the session user is a member of
 - **Channel identification**: Numeric channel ID (stored in `feed_url` column when `is_private=true`)
 - **Entity resolution**: `client.get_entity(channel_id)` resolves channel title and metadata
-- **Media handling**: Photos are downloaded as thumbnails via `client.download_media(msg, thumb=-1)`, base64-encoded, and served as `data:image/jpeg;base64,...` URIs in `photo_url`
+- **Media handling**: Photos are downloaded as thumbnails via `client.download_media(msg, thumb=-1)` and stored in the server's in-memory thumbnail cache; served via `/api/thumb/{key}` URL (no longer base64 in response)
 - **Post URL format**: `https://t.me/c/{channel_id}/{msg_id}` (only accessible to channel members)
-- **Channel avatar**: Downloaded via `client.download_profile_photo(entity)` and base64-encoded
+- **Channel avatar**: Downloaded via `client.download_profile_photo(entity)` and stored in the server's in-memory avatar cache; served via `/api/avatar/{key}` URL
 - **Concurrency**: Private channel fetches run concurrently via `asyncio.gather()`
 - **Channel subscribers**: `entity.participants_count` included as `channel_subscribers` in each post dict for engagement normalization
 - **Post format**: Converted to the same dict structure as scraped public posts for seamless merging
 - **Grouped media merging**: `_merge_telethon_grouped()` uses Telethon's `grouped_id` attribute to detect album messages and merges them into a single post per group
+
+#### Server-Side Media Caching
+All media for Telethon-fetched (private) channel posts is stored in server memory and served via dedicated endpoints, eliminating base64 encoding in API responses:
+
+- **Avatar cache**: Channel avatars keyed by channel ID; served via `GET /api/avatar/{channel_key}` with `Cache-Control: max-age=86400` (1 day)
+- **Thumbnail cache**: Photo thumbnails keyed by a hash; downloaded on demand with an async semaphore preventing duplicate concurrent downloads (`pending_thumbs` dict); served via `GET /api/thumb/{thumb_key}` with `Cache-Control: max-age=604800` (7 days)
+- **Video cache**: Full video bytes stored in memory after first stream; served via `GET /api/video/{video_key}` with HTTP range request support (206 Partial Content, 65 536-byte chunks); max 5 concurrent Telegram video downloads enforced by semaphore
+- **CDN URL cache**: Direct Telegram CDN video URLs scraped from embed pages; cached 3600s; served via `GET /api/video/cdn/{channel_username}/{message_id}`
+- **Cleanup routines**: `_cleanup_video_cache()` and `_cleanup_pending_thumbs()` remove stale entries
+- **Response format change**: Post objects now carry relative URLs (`/api/thumb/...`, `/api/video/...`, `/api/avatar/...`) instead of `data:image/jpeg;base64,...` URIs
 
 #### Post Fetching Pipeline (`GET /api/posts`)
 1. Load user's feeds from Supabase (includes `is_private` and `is_alternate` flags)
@@ -177,6 +199,35 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - Visible only when no valid token exists in `localStorage`
 
 ### 4. API Endpoints
+
+#### `GET /api/avatar/{channel_key}` (protected)
+Returns a cached channel avatar image as JPEG.
+
+- **Cache-Control**: `max-age=86400` (1 day)
+- **Source**: Populated when private channel posts are fetched via Telethon
+
+#### `GET /api/thumb/{thumb_key}` (protected)
+Returns a cached post thumbnail (photo or video still) as JPEG. Downloads from Telegram on demand if not yet cached.
+
+- **Cache-Control**: `max-age=604800` (7 days)
+- **Concurrency**: Async semaphore prevents duplicate concurrent downloads; `pending_thumbs` deduplicates in-flight requests
+
+#### `GET /api/video/{video_key}` (protected)
+Streams a cached video with HTTP range request support.
+
+- **Range support**: Returns 206 Partial Content for byte-range requests; 65 536-byte chunks
+- **Caching**: Full video buffered in memory after first stream
+- **Concurrency**: Max 5 simultaneous Telegram video downloads via semaphore
+
+#### `GET /api/video/cdn/{channel_username}/{message_id}` (protected)
+Scrapes the Telegram embed page (`t.me/{channel}/{msg_id}?embed=1`) to extract the direct CDN video URL from the `<video>` tag.
+
+**Response**:
+```json
+{ "url": "https://cdn.telegram.org/..." }
+```
+
+- **Cache**: CDN URL cached for 3600s
 
 #### `POST /api/login`
 Authenticates a user against the Supabase `Users` table.
@@ -235,10 +286,27 @@ Returns the latest posts from the logged-in user's configured main-feed channels
 ]
 ```
 
-For private channel posts, `photo_url` and `channel_photo` may be base64 `data:image/jpeg;base64,...` URIs, and `post_url` uses the format `https://t.me/c/{channel_id}/{msg_id}`.
+For private channel posts, `photo_url` and `channel_photo` are relative `/api/thumb/...` and `/api/avatar/...` URLs (served by the media cache endpoints), and `post_url` uses the format `https://t.me/c/{channel_id}/{msg_id}`.
+
+#### `POST /api/admin/share-to-channel` (protected, admin-only)
+Forwards a post from any channel to the configured `DIGEST_TELEGRAM_CHANNEL` via Telethon.
+
+**Request body**:
+```json
+{ "post_channel": "channelname", "post_id": "12345" }
+```
+
+**Success response** (200):
+```json
+{ "status": "success" }
+```
+
+**Error responses**:
+- 403: Non-admin user
+- 503: Telegram client not configured
 
 #### `POST /api/top-posts` (protected)
-Sends the user's current feed posts to a configurable AI provider (Google Gemini or Groq) for importance ranking, returns the top 10.
+Sends the user's current feed posts to a configurable AI provider (Google Gemini, Mistral, or Groq) for importance ranking, returns the top 10.
 
 **Request body**:
 ```json
@@ -250,10 +318,11 @@ Sends the user's current feed posts to a configurable AI provider (Google Gemini
 - Strips heavy fields (HTML, base64 images) and truncates text to reduce tokens
 - Computes per-post engagement ratio (views / channel subscribers * 100) for fair cross-channel comparison
 - Reads `ai_provider` and `ai_model` from `config.json`
-- Gemini path: calls `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` with `responseMimeType: "application/json"`
+- Gemini path: uses `google-genai` SDK (`google.genai`)
+- Mistral path: calls `https://api.mistral.ai/v1/chat/completions` (OpenAI-compatible)
 - Groq path: calls `https://api.groq.com/openai/v1/chat/completions`
 - Parses the returned JSON array of indices and maps them back to full post objects
-- On error: logs response body and forwards the API's error message to the frontend
+- On error: logs response body and forwards the API's error message to the frontend; quota errors surfaced with user-friendly messaging
 
 **Success response** (200): JSON array of up to 10 post objects (same format as `/api/posts`)
 
@@ -528,6 +597,12 @@ Serves the main application (`static/index.html`) with `Cache-Control: no-cache,
 - **View-Aware Header**: Management view hides feed-specific controls (sync, sort, stop, filter) to declutter the mobile header
 - **Auto-scroll Preserved**: Full functionality maintained in mobile mode
 
+#### Auto-Hide Header (Mobile)
+- Header automatically slides out of view when scrolling down on mobile and reappears when scrolling up
+- Implemented via `applyAutoHideHeader()` / `hideHeader()` / `showHeader()`
+- Toggled with `toggleAutoHideHeader(enabled)` — can be enabled/disabled programmatically
+- Maximizes visible feed area on small screens without losing navigation access
+
 #### Auto-scrolling Implementation
 - **Engine**: `requestAnimationFrame` with delta-time calculations
 - **Speed**: Configurable pixels per second from API config
@@ -554,6 +629,7 @@ Serves the main application (`static/index.html`) with `Cache-Control: no-cache,
 - **Channel links**: Click to open channel page (event propagation stopped)
 - **Link previews**: Click to open external links
 - **Share button**: Share post via native share sheet or custom popup (see Share System below)
+- **Send button** (admin only): Forwards post to configured Telegram digest channel via `POST /api/admin/share-to-channel`; hidden for non-admin users
 - **Save button**: Bookmark/unbookmark posts for later
 - **Filter buttons**: Toggle between "All" and individual channels
 - **Control buttons**: Manual sync, sort order toggle, and stop/resume scrolling
@@ -812,22 +888,31 @@ beautifulsoup4     # HTML parsing for post extraction
 supabase           # Supabase Python SDK (async client for PostgreSQL)
 python-dotenv      # Load environment variables from .env file
 telethon           # Telegram API client for channel search and private channel access
+google-genai       # Google Generative AI SDK (Gemini API)
+pyjwt              # JWT token encoding/decoding
+tavily-python      # Tavily web search SDK
+playwright         # Browser automation (used for scraping)
 ```
 
 **Key imports in `server.py`**:
-- `asyncio` - Concurrent channel fetching
-- `base64` - Encoding private channel media as data URIs
-- `io` - In-memory byte buffers for media downloads
+- `asyncio` - Concurrent channel fetching and semaphore-based concurrency control
+- `base64` - Encoding/decoding for media cache keys
+- `hashlib` - MD5 hashing for media cache keys
+- `io` - In-memory byte buffers for media downloads and streaming
 - `json` - Config file parsing
 - `logging` - Request/error logging
+- `os` - Environment variable access
 - `re` - Image URL extraction from CSS
 - `secrets` - JWT secret generation
+- `time` - Cache TTL management
 - `pathlib.Path` - File path handling
 - `contextlib.asynccontextmanager` - FastAPI lifespan management
 - `jwt` (PyJWT) - JWT token encoding/decoding for authentication
 - `fastapi` - Web framework, responses, static files, `Depends` for auth middleware
+- `fastapi.responses` - `FileResponse`, `JSONResponse`, `Response`, `StreamingResponse`
 - `dotenv.load_dotenv` - Environment variable loading
-- `telethon` - Telegram API client for channel search, private channel message fetching, and dialog listing (TelegramClient, StringSession, functions.contacts.SearchRequest, Channel, MessageMediaPhoto, MessageMediaDocument)
+- `google.genai` / `google.genai.types` - Gemini AI SDK
+- `telethon` - Telegram API client for channel search, private channel message fetching, and dialog listing (TelegramClient, StringSession, functions.contacts.SearchRequest, Channel, Chat, MessageMediaPhoto, MessageMediaDocument, PeerChannel, DocumentAttributeVideo)
 - `database.Database` - Supabase database abstraction
 
 ## Technical Specifications
@@ -844,9 +929,9 @@ telethon           # Telegram API client for channel search and private channel 
 ### Performance
 - **70% Load Time Reduction**: Optimized frontend architecture and caching strategies significantly improved initial page load performance
 - **Async I/O**: `httpx.AsyncClient` with `asyncio.gather()` for concurrent requests
-- **No caching**: Fresh data on every request (trade-off: freshness vs speed)
+- **No caching** (posts): Fresh feed data on every request (trade-off: freshness vs speed)
+- **Media caching**: Channel avatars, thumbnails, and videos are cached in server memory and served via dedicated endpoints; eliminates base64 encoding overhead in API responses
 - **Timeout**: 15-second timeout per HTTP request
-- **Private channels**: Base64-encoded media increases response size but avoids separate media endpoints
 - **Top 10 AI ranking**: 
   - Posts capped at 50 before sending to LLM to stay within token limits
   - Post data stripped to compact keys (`i`, `ch`, `t`, `dt`, `v`, `e`, `m`, `lp`) — no HTML, base64 images, or full URLs
@@ -929,17 +1014,23 @@ Comprehensive server-side logging of user actions for analytics and monitoring:
 ### Global settings (`config.json`):
 ```json
 {
-  "refresh_interval_minutes": 5,
+  "refresh_interval_minutes": 60,
   "max_posts": 100,
+  "fetch_per_channel": 50,
   "scroll_speed": 50,
   "media_concurrency": 20,
-  "ai_provider": "gemini",
-  "ai_model": "gemini-2.5-flash",
-  "context_provider": "gemini",
+  "alternate_feed_max_posts": 300,
+  "ai_provider": "mistral",
+  "ai_model": "mistral-large-latest",
+  "channel_ai_provider": "nim",
+  "channel_ai_model": "z-ai/glm-5.1",
+  "channel_max_posts_per_call": 100,
+  "channel_phase1_batch_size": 50,
+  "context_provider": "mistral",
   "context_mistral_model": "mistral-large-latest",
-  "context_tavily_depth": "basic",
+  "context_tavily_depth": "advanced",
   "context_tavily_max_results": 5,
-  "alternate_feed_max_posts": 100
+  "deduplicate_posts": true
 }
 ```
 
@@ -947,42 +1038,67 @@ Comprehensive server-side logging of user actions for analytics and monitoring:
 
 ### Alternate Feed Digest (`generate_alternate_digest.py`)
 
-A CLI tool that fetches posts from the alternate feed, processes them through Mistral AI, generates a standalone HTML digest file, and optionally posts new stories to a Telegram channel. Maintains persistent history in `digest_history.json` for incremental updates across runs.
+A CLI tool that fetches posts from the alternate feed, processes them through a configurable AI provider (Mistral or NVIDIA NIM), deduplicates stories against history, generates a standalone HTML digest file, and optionally posts new stories to a Telegram channel via a bot with Perplexity inline buttons. Maintains persistent history in `digest_history.json` for incremental updates across runs.
 
 **Usage**:
 ```bash
-python generate_alternate_digest.py
+python generate_alternate_digest.py [options]
 ```
+
+**Command-line arguments**:
+- `--server URL` — Override server URL (default: `DIGEST_SERVER_URL` env var)
+- `--username USER` — Override admin username (default: `DIGEST_USERNAME` env var)
+- `--password PASS` — Override admin password (default: `DIGEST_PASSWORD` env var)
+- `--output FILE` — Output HTML file path (default: `alternate_digest.html`)
+- `--no-telegram` — Skip Telegram posting entirely
+- `--test` — Test mode: uses `test_digest_history.json` and `TEST_DIGEST_TELEGRAM_CHANNEL`
+- `--single` — Single-post test (requires `--test`): posts only the first fetched post
 
 **Environment variables** (from `.env` or shell):
 - `DIGEST_SERVER_URL` – base URL of the TelegramUpdates server (e.g. `https://app.onrender.com`); auto-prepends `http://` if no protocol is specified
 - `DIGEST_USERNAME` – admin username for login
 - `DIGEST_PASSWORD` – admin password for login
-- `MISTRAL_API_KEY` – Mistral API key for AI processing
+- `MISTRAL_API_KEY` – Mistral API key (required when `channel_ai_provider` is "mistral")
+- `NVIDIA_API_KEY` – NVIDIA NIM API key (required when `channel_ai_provider` is "nim")
 - `DIGEST_TELEGRAM_CHANNEL` – target Telegram channel (`@username` or numeric ID); if not set, Telegram posting is skipped
+- `TEST_DIGEST_TELEGRAM_CHANNEL` – target channel used in `--test` mode
 - `TELEGRAM_API_ID` – Telegram API ID (reused from server config; required for posting)
 - `TELEGRAM_API_HASH` – Telegram API hash (reused from server config; required for posting)
 - `TELEGRAM_SESSION` – Telethon StringSession (reused from server config; required for posting)
+- `TELEGRAM_BOT_TOKEN` – Telegram bot token (optional); if set, stories are posted via bot client which adds a Perplexity inline button "ספר לי עוד על זה" (Tell me more about this); falls back to user client if missing
+
+**AI Provider Classes**:
+- `AIProvider` (base): OpenAI-compatible chat completion with streaming JSON support, exponential-backoff retry (5s → 15s → 30s), 300s timeout
+- `MistralProvider(AIProvider)`: `https://api.mistral.ai/v1`; supports JSON response format
+- `NIMProvider(AIProvider)`: NVIDIA Inference Microservices at `https://integrate.api.nvidia.com/v1`; does NOT support JSON response format; parses JSON from free-text response
+- `build_provider(config)`: Factory that reads `channel_ai_provider` and `channel_ai_model` from `config.json` and returns the appropriate provider
 
 **Pipeline**:
 1. **Authentication**: Logs in via `POST /api/login` using admin credentials; verifies admin status
 2. **Fetch Posts**: Calls `GET /api/alternate-posts` with JWT authentication
-3. **Load History**: Reads `digest_history.json` containing accumulated stories and a set of previously processed raw post keys (`channel_postid`)
-4. **Filter New Posts**: Compares fetched posts against `processed_post_keys` from history; only posts with a `channel_postid` key not in the set are sent to Mistral. If no new posts exist, the script regenerates HTML from existing history and exits
-5. **Prepare for LLM**: Strips heavy fields (HTML, base64 images), truncates text, computes engagement ratio (views/subscribers)
-6. **Mistral AI Processing**: Sends `{"new_posts": [...], "previously_generated": [...]}` with the system prompt from `alternate_feed_prompt.md`. The `previously_generated` array contains the last 100 stories from history (sorted by recency) for deduplication context. The LLM returns up to 10 new stories/updates, each with `source_indices` (referencing `new_posts`) and `history_index` (null for new, index for updates)
-7. **Media URL Resolution**: Converts relative `/api/` media URLs to absolute URLs using the server base URL; includes `photo_url`, `video_thumb`, and `link_preview.image` fallbacks. Uses URL-path fingerprinting (Layer 1 dedup) to eliminate CDN variants of the same image before downloading
-8. **Save History**: Appends new stories to `full_history`. Updates are appended with a `parent_index` linking to the original story. All raw post keys from the current batch are added to `processed_post_keys` (regardless of whether they produced output). Persists `posted_media_hashes` for cross-run media dedup. Writes to `digest_history.json`
-9. **Video URL Resolution** (optional, only when Telegram posting is enabled): Scans source posts referenced by each story's `source_indices` for `has_video=true`. For public channels, scrapes the Telegram embed page (`https://t.me/{channel}/{post_id}?embed=1`) to extract the direct CDN video URL from the `<video>` tag. Private channel videos are skipped (their thumbnails are still posted as images). Collected URLs are stored in a `video_urls` list on each story
-10. **Telegram Channel Posting** (optional): If `DIGEST_TELEGRAM_CHANNEL` is set and Telegram credentials are configured, posts each new story and update to the target channel via Telethon. Updates are prefixed with "**עדכון**". Media images are downloaded into memory, deduplicated by content hash (Layer 2: within-run, Layer 3: cross-run via persisted `posted_media_hashes`), and sent as photo albums. Videos are downloaded from CDN URLs (120s timeout) and uploaded individually with `supports_streaming=True`. Images are sent first (as album with caption), then videos (2s delay between each). Text-only stories are sent as plain messages. Posts are spaced 1.5s apart to avoid rate limits. Failures are logged but non-fatal
-11. **HTML Generation**: Produces a self-contained `alternate_digest.html` rendering the **full history archive** (all accumulated stories), sorted by most recent first. Stories from the latest run display importance rank badges (#1, #2, etc.); updates display an "UPDATE" badge with distinct styling; older stories have no rank badge
+3. **Load History**: Reads `digest_history.json` containing accumulated stories, processed post keys, posted media hashes, and processed post texts for fuzzy deduplication
+4. **Post-Level Deduplication** (if `deduplicate_posts=true` in config):
+   - `deduplicate_posts()` removes near-duplicates within the current batch (substring containment + fuzzy matching, threshold 0.85)
+   - `filter_covered_by_history()` splits posts into `(to_send, covered)` by comparing against stored post texts from previous runs (threshold 0.85); covered posts are tracked but not re-sent to the AI
+5. **Prepare for LLM**: Strips heavy fields (HTML, media), truncates text to 300 chars, computes engagement ratio (views/subscribers)
+6. **AI Story Generation**: Sends `{"new_posts": [...], "previously_generated": [...]}` with the system prompt from `alternate_feed_prompt.md` to the configured provider. The `previously_generated` array contains the last 100 stories for deduplication context. The LLM returns up to 10 new stories/updates, each with `source_indices` and `history_index`
+7. **Story-Level Deduplication Against History**:
+   - `check_story_against_history()` classifies each returned story as "duplicate" (threshold 0.88), "update" (threshold 0.70), or "new"
+   - Duplicates are discarded
+   - Updates are collected and sent as a batch to `rewrite_updates_batch()` which extracts only genuinely new facts in a single AI call
+8. **Media URL Resolution**: Converts relative `/api/` media URLs to absolute URLs using the server base URL; includes `photo_url`, `video_thumb`, and `link_preview.image` fallbacks. Uses URL-path fingerprinting (Layer 1 dedup) to eliminate CDN variants of the same image before downloading; intra-story and cross-story duplicate image removal (Layers 1.5 and 1.75)
+9. **Save History**: Appends new stories to `full_history`. Updates are appended with a `parent_index` linking to the original story. All raw post keys and their texts from the current batch are saved to `processed_post_keys` and `processed_post_texts`. Persists `posted_media_hashes` for cross-run media dedup. Writes to `digest_history.json`
+10. **Video URL Resolution** (optional, only when Telegram posting is enabled): Scans source posts referenced by each story's `source_indices` for `has_video=true`. For public channels, scrapes the Telegram embed page (`https://t.me/{channel}/{post_id}?embed=1`) to extract the direct CDN video URL from the `<video>` tag. Private channel videos are skipped (their thumbnails are still posted as images). Cross-story video URL deduplication applied. Collected URLs are stored in a `video_urls` list on each story
+11. **Telegram Channel Posting** (optional): If `DIGEST_TELEGRAM_CHANNEL` is set and Telegram credentials are configured, posts each new story and update to the target channel. When `TELEGRAM_BOT_TOKEN` is available, uses the bot client which attaches a Perplexity inline button; otherwise falls back to user client. Updates are prefixed with "**עדכון**". Media images are downloaded into memory (max 10 images, 5 videos per story), deduplicated by content hash (Layer 2: within-run, Layer 3: cross-run via persisted `posted_media_hashes`), and sent as photo albums. Videos are downloaded from CDN URLs (120s timeout) and uploaded individually with `supports_streaming=True`. Images are sent first (as album with caption), then videos (2s delay between each). Text-only stories are sent as plain messages. Posts are spaced 1.5s apart to avoid rate limits. Failures are logged but non-fatal
+12. **HTML Generation**: Produces a self-contained `alternate_digest.html` rendering the **full history archive** (all accumulated stories), sorted by most recent first. Stories from the latest run display importance rank badges (#1, #2, etc.); updates display an "UPDATE" badge with distinct styling; older stories have no rank badge
 
 **History file** (`digest_history.json`):
 ```json
 {
   "stories": [ /* accumulated story objects with text, importance, media_urls, source_indices, history_index, parent_index, created_at, updated_at */ ],
-  "processed_post_keys": [ /* sorted list of "channel_postid" strings for all raw posts ever sent to Mistral */ ],
+  "processed_post_keys": [ /* sorted list of "channel_postid" strings for all raw posts ever processed */ ],
   "posted_media_hashes": [ /* sorted list of MD5 hex strings for all media images posted to Telegram */ ],
+  "processed_post_texts": { "channel_postid": "first 300 chars of post text..." },
   "last_updated": "2026-04-18T23:10:49"
 }
 ```
@@ -993,17 +1109,23 @@ python generate_alternate_digest.py
 - `log(msg, error=False)`: Timestamped logging to stdout/stderr
 - `login(base_url, username, password) -> str`: Authenticates and returns JWT
 - `fetch_alternate_posts(base_url, token) -> list[dict]`: Fetches posts from the alternate-posts endpoint
-- `load_history() -> tuple[list[dict], set[str], set[str]]`: Loads stories, processed post keys, and posted media hashes from `digest_history.json`
+- `load_history() -> tuple[list[dict], set[str], set[str], dict[str,str]]`: Loads stories, processed post keys, posted media hashes, and processed post texts from `digest_history.json`
 - `_post_key(post) -> str`: Builds unique key (`channel_postid`) for a raw Telegram post
-- `prepare_slim_posts(posts) -> list[dict]`: Strips heavy fields, computes engagement ratio
-- `call_mistral(api_key, model, prompt, user_content) -> list[dict]`: Sends to Mistral AI, parses structured JSON response (300s timeout)
+- `prepare_slim_posts(posts, limit=100) -> list[dict]`: Strips heavy fields, computes engagement ratio, truncates text to 300 chars
+- `deduplicate_posts(posts, similarity_threshold=0.85) -> list[dict]`: Removes near-duplicate posts within the current batch using substring containment + fuzzy matching; keeps the longer/more complete version
+- `filter_covered_by_history(posts, processed_post_texts, similarity_threshold=0.85) -> tuple`: Splits posts into `(to_send, covered)` by comparing against stored post texts from previous runs
+- `build_provider(config) -> AIProvider`: Factory returning MistralProvider or NIMProvider based on `config.json`
+- `call_provider(provider, prompt, user_content) -> list[dict]`: Sends posts to the configured AI provider, parses structured JSON story response
+- `check_story_against_history(story, history, threshold_duplicate=0.88, threshold_update=0.70) -> tuple`: Classifies a generated story as "duplicate", "update", or "new" against the full history
+- `rewrite_updates_batch(pairs, provider) -> list[dict]`: Single AI call to rewrite all pending updates, extracting only genuinely new facts; pairs are `[{index, new_story, existing_story}, ...]`
 - `_media_url_fingerprint(url) -> str`: Extracts a stable fingerprint from a URL by stripping query params and isolating the path tail (Layer 1 dedup)
-- `resolve_media_urls(stories, original_posts, base_url) -> list[dict]`: Converts relative media URLs to absolute with URL-path fingerprint dedup
+- `resolve_media_urls(stories, original_posts, base_url) -> list[dict]`: Converts relative media URLs to absolute with URL-path fingerprint dedup (Layers 1, 1.5, 1.75)
 - `scrape_video_cdn_url(channel, post_id) -> str | None`: Scrapes Telegram's embed page to extract the direct CDN video URL from the `<video>` tag; public channels only
-- `resolve_video_urls(stories, original_posts) -> list[dict]`: Scans source posts for `has_video=true`, scrapes CDN URLs, populates `video_urls` list on each story; skips private channels
-- `connect_telegram() -> TelegramClient | None`: Creates and connects a Telethon client; returns `None` if credentials are missing or session is unauthorized
-- `post_stories_to_telegram(stories, channel, posted_media_hashes) -> set[str]`: Posts stories to a Telegram channel with content-hash media dedup (Layers 2+3); downloads images and videos into memory, sends photo albums then individual videos with streaming support, returns updated hash set
-- `save_history(new_stories, full_history, offset, filtered_posts, processed_keys, posted_media_hashes)`: Appends stories, tracks post keys and media hashes, writes to disk
+- `resolve_video_urls(stories, original_posts) -> list[dict]`: Scans source posts for `has_video=true`, scrapes CDN URLs, populates `video_urls` list on each story; skips private channels; applies cross-story URL dedup
+- `connect_telegram() -> TelegramClient | None`: Creates and connects a Telethon user client; returns `None` if credentials are missing or session is unauthorized
+- `connect_telegram_bot() -> TelegramClient | None`: Creates and connects a Telethon bot client using `TELEGRAM_BOT_TOKEN`; returns `None` if token is missing
+- `post_stories_to_telegram(stories, channel, posted_media_hashes) -> set[str]`: Posts stories to a Telegram channel; uses bot client (with Perplexity inline button) if available, falls back to user client; content-hash media dedup (Layers 2+3); downloads images and videos into memory, sends photo albums then individual videos with streaming support; returns updated hash set
+- `save_history(new_stories, full_history, offset, filtered_posts, processed_keys, posted_media_hashes, processed_post_texts)`: Appends stories, tracks post keys, texts, and media hashes, writes to disk
 - `generate_html(stories, output_path)`: Renders the full history archive as a dark-themed HTML file with clickable media, rank badges, and update badges
 
 ### Alternate Feed Prompt (`alternate_feed_prompt.md`)
@@ -1052,7 +1174,7 @@ System prompt used by the standalone digest script for Mistral AI processing. Co
 - `get_admin_channels(request, user)`: `GET /api/admin/channels` -- lists all channels the Telethon session is a member of (admin-only)
 - `get_full_config(user)`: `GET /api/admin/config` -- returns config.json (admin-only, 403 for non-admin)
 - `update_config(request, user)`: `POST /api/admin/config` -- updates config.json (admin-only, 403 for non-admin)
-- `get_top_posts(request, user)`: `POST /api/top-posts` -- receives posts array, computes per-post engagement ratio (views/subscribers), sends stripped-down versions to configured AI provider (Google Gemini or Groq, per `ai_provider`/`ai_model` in `config.json`) with system prompt from `top10_prompt.md`, parses response indices, returns top 10 full post objects
+- `get_top_posts(request, user)`: `POST /api/top-posts` -- receives posts array, computes per-post engagement ratio (views/subscribers), sends stripped-down versions to configured AI provider (Google Gemini, Mistral, or Groq, per `ai_provider`/`ai_model` in `config.json`) with system prompt from `top10_prompt.md`, parses response indices, returns top 10 full post objects
 - `get_context_summary(request, user)`: `POST /api/context-summary` -- parses request body, logs user action, routes to appropriate context provider based on `context_provider` in `config.json`
 - `_context_summary_gemini(body)`: Generates context using Google Gemini with Google Search grounding; reads `context_summary_prompt.md`, returns summary and sources
 - `_context_summary_mistral(body)`: Generates context using Mistral AI + Tavily; instantiates `WebSearch` class with config parameters, returns summary and sources
@@ -1063,7 +1185,15 @@ System prompt used by the standalone digest script for Mistral AI processing. Co
 - `parse_channel_posts(html: str, channel: str) -> list[dict]`: BeautifulSoup parsing logic
 - `_merge_grouped_posts(posts) -> list[dict]`: Post-processing for HTML-scraped posts; detects consecutive post IDs with missing text (media album groups) and merges them into single posts
 - `_merge_telethon_grouped(posts) -> list[dict]`: Post-processing for Telethon-fetched posts; uses `grouped_id` to merge album messages into single posts
-- `fetch_private_channel_posts(tg, channel_id, limit) -> list[dict]`: Telethon-based message fetching with base64 media encoding
+- `share_to_channel(request, user)`: `POST /api/admin/share-to-channel` -- admin-only; forwards a post to `DIGEST_TELEGRAM_CHANNEL` via Telethon
+- `get_avatar(channel_key, user)`: `GET /api/avatar/{channel_key}` -- serves cached channel avatar as JPEG
+- `get_thumb(thumb_key, user)`: `GET /api/thumb/{thumb_key}` -- serves cached post thumbnail; downloads on demand if not cached
+- `get_video(video_key, request, user)`: `GET /api/video/{video_key}` -- streams cached video with range request support (206 Partial Content)
+- `get_video_cdn_url(channel_username, message_id, user)`: `GET /api/video/cdn/{channel_username}/{message_id}` -- scrapes and caches CDN video URL
+- `_cleanup_video_cache()`: Removes stale video cache entries
+- `_cleanup_pending_thumbs()`: Removes stale pending thumbnail references
+- `scrape_telegram_video_url(channel, post_id) -> str | None`: Scrapes Telegram embed page to extract direct CDN video URL
+- `fetch_channel_posts_telethon(tg_client, channel_id, limit) -> list[dict]`: Telethon-based message fetching; stores media in server cache, returns relative `/api/thumb/...` and `/api/avatar/...` URLs
 - `load_config() -> dict`: JSON config file loader
 - `get_saved_posts(request, user)`: `GET /api/saved` -- returns the logged-in user's saved posts from Supabase; logs view action with username and post count
 - `save_post(request, user)`: `POST /api/saved` -- saves a post for the logged-in user in Supabase (duplicate check); logs save action with username, channel, and post_id
@@ -1110,6 +1240,10 @@ System prompt used by the standalone digest script for Mistral AI processing. Co
 - `hideSharePopup()`: Removes any open share popup and overlay
 - `copyTextFallback(text)`: Clipboard fallback using `execCommand('copy')` for older browsers
 - `flashShareButton(btn, label)`: Briefly changes the share button label for feedback
+- `handlePostToChannel(btn)`: Click handler for the admin-only "Send" button; calls `POST /api/admin/share-to-channel` to forward the post to the configured digest channel
+- `applyAutoHideHeader()`: Attaches scroll listener for auto-hiding the header on mobile
+- `hideHeader()` / `showHeader()`: Slide header out of / back into view
+- `toggleAutoHideHeader(enabled)`: Enables or disables auto-hide header behavior
 - `loadManagementInterface()`: Loads feed list, private channels section (admin), alternate feed management (admin), and settings (admin)
 - `loadFeedList()`: Fetches and renders user's main feeds from `/api/feeds` (excluding `is_alternate=true`) with Private/Admin badges
 - `addFeed()`: Adds a feed via `POST /api/feeds` with duplicate error display
@@ -1155,16 +1289,17 @@ System prompt used by the standalone digest script for Mistral AI processing. Co
 ├── server.py              # FastAPI backend with PWA support, Supabase lifespan, and Telethon integration
 ├── database.py            # Database class encapsulating Supabase async client
 ├── web_search.py          # WebSearch class for Mistral AI + Tavily web search integration
-├── config.json            # Global settings (refresh interval, max posts, scroll speed, AI provider/model, context provider, alternate feed max posts)
+├── config.json            # Global settings (refresh interval, max posts, fetch_per_channel, scroll speed, AI provider/model, channel AI provider/model, context provider, dedup flags, alternate feed max posts)
 ├── top10_prompt.md        # Editable system prompt for AI Top 10 ranking (with exclusion rules)
-├── alternate_feed_prompt.md   # System prompt for Mistral AI alternate feed processing (dedup, rank, rephrase)
+├── alternate_feed_prompt.md   # System prompt for alternate feed digest AI processing (dedup, rank, rephrase, Proud Patriot persona)
+├── alternate_feed_consolidation_prompt.md  # Variant of the alternate feed prompt for consolidation use cases
 ├── context_summary_prompt.md  # System prompt for Gemini context search with Google Search grounding
 ├── search_terms.md        # Prompt for Mistral AI to extract search terms from posts
 ├── summarize.md           # Prompt for Mistral AI to summarize web search results
 ├── generate_session.py    # Telethon StringSession generator (dev/prod labeled sessions)
-├── generate_alternate_digest.py  # Standalone script: fetch alternate feed, process with Mistral AI, generate HTML digest, optionally post to Telegram channel
-├── digest_history.json    # Persistent storage for generated stories, processed post keys, and posted media hashes (created/updated by generate_alternate_digest.py)
-├── .env                   # Environment variables (SUPABASE_URL, SUPABASE_KEY, TELEGRAM_*, GROK_API_KEY, GOOGLE_API_KEY, MISTRAL_API_KEY, TAVILY_API_KEY, DIGEST_SERVER_URL, DIGEST_USERNAME, DIGEST_PASSWORD, DIGEST_TELEGRAM_CHANNEL)
+├── generate_alternate_digest.py  # Standalone script: fetch alternate feed, deduplicate, process with Mistral/NIM AI, generate HTML digest, optionally post to Telegram channel via bot
+├── digest_history.json    # Persistent storage for generated stories, processed post keys, post texts, and posted media hashes (created/updated by generate_alternate_digest.py)
+├── .env                   # Environment variables (SUPABASE_URL, SUPABASE_KEY, TELEGRAM_*, GROK_API_KEY, GOOGLE_API_KEY, MISTRAL_API_KEY, NVIDIA_API_KEY, TAVILY_API_KEY, TELEGRAM_BOT_TOKEN, DIGEST_SERVER_URL, DIGEST_USERNAME, DIGEST_PASSWORD, DIGEST_TELEGRAM_CHANNEL, TEST_DIGEST_TELEGRAM_CHANNEL)
 ├── requirements.txt       # Python dependencies
 ├── static/
 │   ├── index.html         # Complete frontend application with PWA and share system
@@ -1242,9 +1377,10 @@ System prompt used by the standalone digest script for Mistral AI processing. Co
 ### Settings Management (Admin Only, `user_id = 1`)
 - **Refresh Interval**: Configurable auto-refresh timing (1-60 minutes)
 - **Max Posts**: Main feed post limit configuration (5-100 posts)
+- **Fetch per Channel**: Posts fetched per channel per request
 - **Alternate Feed Max Posts**: Alternate feed post limit configuration (5-500 posts)
 - **Scroll Speed**: Auto-scroll speed adjustment (10-200 pixels/second)
-- **AI Provider**: Select between Google Gemini and Groq for AI ranking
-- **AI Model**: Model selector populated dynamically based on selected provider (Gemini: gemini-2.0-flash-lite, gemini-2.0-flash, gemini-2.5-flash-lite, gemini-2.5-flash, gemini-2.5-pro; Groq: llama-3.3-70b-versatile, llama-3.1-8b-instant, etc.)
+- **AI Provider**: Select between Google Gemini, Mistral AI, and Groq for AI ranking
+- **AI Model**: Model selector populated dynamically based on selected provider (Gemini: gemini-2.0-flash-lite, gemini-2.0-flash, gemini-2.5-flash-lite, gemini-2.5-flash, gemini-2.5-pro; Mistral: mistral-small-latest, mistral-medium-latest, mistral-large-latest; Groq: llama-3.3-70b-versatile, llama-3.1-8b-instant, etc.)
 - **Visibility**: Settings section is only shown when `localStorage.getItem('is_admin') === 'true'`
 - **Persistence**: Saved via `POST /api/admin/config` which overwrites `config.json`

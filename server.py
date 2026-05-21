@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from telethon import TelegramClient, functions
+from telethon import TelegramClient, Button, functions
 from telethon.sessions import StringSession
 from telethon.tl.types import Channel, Chat, MessageMediaPhoto, MessageMediaDocument, PeerChannel, DocumentAttributeVideo
 from google import genai
@@ -77,11 +77,25 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Telegram API credentials not configured; channel search disabled")
 
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    app.state.bot = None
+    if bot_token and api_id and api_hash:
+        try:
+            bot = TelegramClient(StringSession(), int(api_id), api_hash)
+            await bot.start(bot_token=bot_token)
+            app.state.bot = bot
+            logger.info("Telegram bot client connected")
+        except Exception as e:
+            logger.warning("Telegram bot client failed to initialize: %s", e)
+
     yield
 
     if app.state.telegram:
         await app.state.telegram.disconnect()
         logger.info("Telegram client disconnected")
+    if app.state.bot:
+        await app.state.bot.disconnect()
+        logger.info("Telegram bot client disconnected")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -1204,6 +1218,44 @@ async def share_to_channel(request: Request, user: dict = Depends(require_auth))
     except Exception as e:
         logger.error("Failed to forward to Telegram channel: %s", e)
         raise HTTPException(status_code=500, detail=f"Failed to forward: {e}")
+
+
+@app.post("/api/admin/compose-to-channel")
+async def compose_to_channel(request: Request, user: dict = Depends(require_auth)):
+    if user["user_id"] != 1:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    body = await request.json()
+    text = body.get("text", "").strip()
+    target = body.get("target", "")
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    if target == "test":
+        channel = os.environ.get("TEST_DIGEST_TELEGRAM_CHANNEL")
+        if not channel:
+            raise HTTPException(status_code=503, detail="TEST_DIGEST_TELEGRAM_CHANNEL not configured")
+    elif target == "production":
+        channel = os.environ.get("DIGEST_TELEGRAM_CHANNEL")
+        if not channel:
+            raise HTTPException(status_code=503, detail="DIGEST_TELEGRAM_CHANNEL not configured")
+    else:
+        raise HTTPException(status_code=400, detail="target must be 'test' or 'production'")
+    bot: TelegramClient | None = request.app.state.bot
+    tg: TelegramClient | None = request.app.state.telegram
+    sender = bot or tg
+    if not sender:
+        raise HTTPException(status_code=503, detail="Telegram client not available")
+    buttons = [[Button.inline("ספר לי עוד על זה", b"px")]] if bot else None
+    try:
+        entity = await sender.get_entity(int(channel) if channel.lstrip("-").isdigit() else channel)
+        await sender.send_message(entity, text, link_preview=True, buttons=buttons)
+        logger.info(
+            "User '%s' composed post to %s Telegram channel '%s'",
+            user["user_name"], target, channel,
+        )
+        return {"status": "success"}
+    except Exception as e:
+        logger.error("Failed to compose post to Telegram channel: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to send: {e}")
 
 
 @app.get("/api/admin/config")

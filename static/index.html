@@ -1979,8 +1979,24 @@
         </div>
       </div>
       <button class="add-btn" id="saveSettingsBtn" style="margin-top:10px;">Save Settings</button>
+      <button class="add-btn" id="openComposeBtn" style="margin-top:8px; background: var(--accent);">✏️ Post to Channel</button>
     </div>
   </div>
+
+  <!-- Compose modal -->
+  <div id="composeModalOverlay" style="display:none; position:fixed; inset:0; z-index:2000; background:rgba(0,0,0,0.6); align-items:center; justify-content:center;">
+    <div id="composeModal" style="background:var(--card-bg); border-radius:12px; padding:24px; width:min(680px,95vw); max-height:90vh; display:flex; flex-direction:column; gap:14px; box-shadow:0 8px 32px rgba(0,0,0,0.4); position:relative;">
+      <button onclick="closeComposeModal()" style="position:absolute; top:12px; right:14px; background:none; border:none; font-size:1.4rem; cursor:pointer; color:var(--text); opacity:0.6; line-height:1;">✕</button>
+      <h3 style="margin:0; font-size:1.1rem;">Post to Telegram Channel</h3>
+      <textarea id="composeText" rows="10" placeholder="Write your post… paste links here too." style="resize:vertical; padding:10px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:0.95rem; font-family:inherit; width:100%; box-sizing:border-box;"></textarea>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <button class="add-btn" id="sendTestBtn" onclick="sendComposedPost('test')" style="flex:1; min-width:140px;">Send to Test Channel</button>
+        <button class="add-btn" id="sendProdBtn" onclick="sendComposedPost('production')" style="flex:1; min-width:160px; background:#ef5350;">Send to Production</button>
+      </div>
+      <div id="composeStatus" style="font-size:0.88rem; min-height:1.2em; color:var(--text-secondary);"></div>
+    </div>
+  </div>
+
   <div class="autocomplete-backdrop" id="autocompleteBackdrop"></div>
   <div class="autocomplete-popup" id="autocompletePopup">
     <div class="autocomplete-popup-header">
@@ -2840,6 +2856,7 @@
     document.addEventListener('keydown', (evt) => {
       if (evt.key === 'Escape') {
         closeImageFullscreen();
+        closeComposeModal();
       }
     });
 
@@ -3898,6 +3915,55 @@
       if (models.includes(current)) select.value = current;
     }
 
+    function openComposeModal() {
+      const overlay = document.getElementById('composeModalOverlay');
+      overlay.style.display = 'flex';
+      document.getElementById('composeText').value = '';
+      document.getElementById('composeStatus').textContent = '';
+      document.getElementById('sendTestBtn').disabled = false;
+      document.getElementById('sendProdBtn').disabled = false;
+      setTimeout(() => document.getElementById('composeText').focus(), 50);
+    }
+
+    function closeComposeModal() {
+      document.getElementById('composeModalOverlay').style.display = 'none';
+    }
+
+    async function sendComposedPost(target) {
+      const text = document.getElementById('composeText').value.trim();
+      const status = document.getElementById('composeStatus');
+      if (!text) { status.style.color = '#ef5350'; status.textContent = 'Please write something first.'; return; }
+      const testBtn = document.getElementById('sendTestBtn');
+      const prodBtn = document.getElementById('sendProdBtn');
+      testBtn.disabled = true;
+      prodBtn.disabled = true;
+      status.style.color = 'var(--text-secondary)';
+      status.textContent = 'Sending…';
+      try {
+        const res = await authFetch('/api/admin/compose-to-channel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, target }),
+        });
+        if (res.ok) {
+          status.style.color = '#4caf50';
+          status.textContent = '✓ Sent!';
+          setTimeout(closeComposeModal, 1800);
+        } else {
+          const err = await res.json().catch(() => ({}));
+          status.style.color = '#ef5350';
+          status.textContent = err.detail || 'Failed to send.';
+          testBtn.disabled = false;
+          prodBtn.disabled = false;
+        }
+      } catch (e) {
+        status.style.color = '#ef5350';
+        status.textContent = 'Network error.';
+        testBtn.disabled = false;
+        prodBtn.disabled = false;
+      }
+    }
+
     async function saveAdminSettings() {
       const config = {
         refresh_interval_minutes: parseInt(document.getElementById('refreshInterval').value),
@@ -4021,6 +4087,7 @@
       document.getElementById('addFeedBtn').addEventListener('click', openAddChannelPopup);
       document.getElementById('loadPrivateChannelsBtn').addEventListener('click', loadPrivateChannels);
       document.getElementById('saveSettingsBtn').addEventListener('click', saveAdminSettings);
+      document.getElementById('openComposeBtn').addEventListener('click', openComposeModal);
       document.getElementById('aiProvider').addEventListener('change', (e) => {
         updateAiModelOptions(e.target.value);
       });

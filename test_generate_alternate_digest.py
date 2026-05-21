@@ -33,7 +33,7 @@ from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from telethon import TelegramClient
+from telethon import TelegramClient, Button
 from telethon.sessions import StringSession
 
 if sys.stdout.encoding != "utf-8":
@@ -158,12 +158,15 @@ HISTORY_PATH = Path(__file__).parent / "digest_history.json"
 # --- Script Configuration ---
 POST_TO_CHANNEL = True   # Post stories to the Telegram channel (requires DIGEST_TELEGRAM_CHANNEL env var)
 POST_VIDEOS = True      # Download and post videos from source posts
-
-DIVIDER = "\u200e                         "
-
-
 def wrap_with_divider(text: str) -> str:
-    return f"{text}\n\n{DIVIDER}\n\n\n\n\u200b"
+    return text
+
+
+def _md_to_html(text: str) -> str:
+    """Convert **bold** markdown to Telegram HTML."""
+    text = html.escape(text)
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
+    return text
 
 
 def log(msg: str, error: bool = False) -> None:
@@ -684,6 +687,18 @@ async def connect_telegram() -> TelegramClient | None:
     return client
 
 
+async def connect_telegram_bot() -> TelegramClient | None:
+    """Create and connect a Telethon client logged in as a bot. None if TELEGRAM_BOT_TOKEN unset."""
+    api_id = os.environ.get("TELEGRAM_API_ID")
+    api_hash = os.environ.get("TELEGRAM_API_HASH")
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not (api_id and api_hash and bot_token):
+        return None
+    client = TelegramClient("digest_bot.session", int(api_id), api_hash)
+    await client.start(bot_token=bot_token)
+    return client
+
+
 async def post_stories_to_telegram(
     stories: list[dict],
     channel: str | int,
@@ -700,12 +715,20 @@ async def post_stories_to_telegram(
         log("Telegram credentials missing; skipping channel posting.", error=True)
         return posted_media_hashes
 
+    bot_client = await connect_telegram_bot()
+    sender = bot_client if bot_client is not None else client
+    buttons = [[Button.inline("ספר לי עוד על זה", b"px")]] if bot_client else None
+    if bot_client is not None:
+        log("Posting via bot client (Perplexity button enabled).")
+
     try:
-        entity = await client.get_entity(channel)
+        entity = await sender.get_entity(channel)
         log(f"Posting {len(stories)} items to Telegram channel: {getattr(entity, 'title', channel)}")
     except Exception as e:
         log(f"Failed to resolve Telegram channel '{channel}': {e}", error=True)
         await client.disconnect()
+        if bot_client is not None:
+            await bot_client.disconnect()
         return posted_media_hashes
 
     run_hashes: set[str] = set()
@@ -718,8 +741,7 @@ async def post_stories_to_telegram(
             story_text = story.get("text", "")
             if is_update:
                 story_text = "**עדכון**\n\n" + story_text
-            text = wrap_with_divider(story_text)
-            caption = text[:1024]
+            text = _md_to_html(wrap_with_divider(story_text))
 
             image_buffers = []
             async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http:
@@ -791,14 +813,14 @@ async def post_stories_to_telegram(
                         except Exception as e:
                             log(f"  Failed to download video thumb {url}: {e}", error=True)
 
-            if image_buffers and video_buffers:
-                await client.send_file(entity, file=video_buffers)
-                await client.send_file(entity, file=image_buffers, caption=caption, parse_mode="md")
-            elif image_buffers or video_buffers:
-                all_media = image_buffers + video_buffers
-                await client.send_file(entity, file=all_media, caption=caption, parse_mode="md")
+            all_media = video_buffers + image_buffers
+            if not all_media:
+                text = "\n" + text
+            if all_media:
+                await sender.send_file(entity, file=all_media)
+                await sender.send_message(entity, text, parse_mode="html", link_preview=False, buttons=buttons)
             else:
-                await client.send_message(entity, text, parse_mode="md", link_preview=False)
+                await sender.send_message(entity, text, parse_mode="html", link_preview=False, buttons=buttons)
 
             label = "UPDATE" if is_update else "NEW"
             media_summary = f"{len(image_buffers)} img, {len(video_buffers)} vid"
@@ -810,6 +832,8 @@ async def post_stories_to_telegram(
 
     posted_media_hashes.update(run_hashes)
     await client.disconnect()
+    if bot_client is not None:
+        await bot_client.disconnect()
     log(f"Telegram posting complete. {len(run_hashes)} new media hashes tracked.")
     return posted_media_hashes
 
@@ -973,6 +997,7 @@ def main():
     parser.add_argument("--output", default=None, help="Output HTML file path")
     parser.add_argument("--no-telegram", action="store_true", help="Skip posting to Telegram channel")
     parser.add_argument("--test", action="store_true", help="Test mode: use test history file and TEST_DIGEST_TELEGRAM_CHANNEL")
+    parser.add_argument("--single", action="store_true", help="Skip AI/dedup; post only the first fetched post to the test channel and exit. Requires --test.")
     args = parser.parse_args()
 
     if args.test:
@@ -1013,6 +1038,50 @@ def main():
     if not all_posts:
         log("No posts in alternate feed. Nothing to process.")
         sys.exit(0)
+
+    if args.single:
+        if not args.test:
+            log("--single requires --test mode (uses TEST_DIGEST_TELEGRAM_CHANNEL).", error=True)
+            sys.exit(1)
+        first_post = all_posts[0]
+        text = _get_post_text(first_post) or "(empty)"
+        log(f"[SINGLE MODE] Posting first fetched post: {text[:80]}...")
+
+        story = {
+            "text": text,
+            "media_urls": [],
+            "video_urls": [],
+            "video_thumb_urls": [],
+            "source_indices": [0],
+            "history_index": None,
+        }
+        single_stories = [story]
+        single_stories = resolve_media_urls(single_stories, all_posts, base_url)
+        if POST_VIDEOS:
+            single_stories = asyncio.run(resolve_video_urls(single_stories, all_posts))
+
+        # Telegram media albums (multi-file send) silently drop inline buttons.
+        # Cap to a single media item so the Perplexity button survives.
+        s = single_stories[0]
+        if s.get("video_urls"):
+            s["video_urls"] = s["video_urls"][:1]
+            s["media_urls"] = []
+            s["video_thumb_urls"] = []
+        elif s.get("media_urls"):
+            s["media_urls"] = s["media_urls"][:1]
+            s["video_thumb_urls"] = []
+        else:
+            s["video_thumb_urls"] = s["video_thumb_urls"][:1]
+
+        tg_channel = os.environ.get("TEST_DIGEST_TELEGRAM_CHANNEL", "")
+        if not tg_channel:
+            log("TEST_DIGEST_TELEGRAM_CHANNEL not set; cannot post.", error=True)
+            sys.exit(1)
+        if tg_channel.lstrip("-").isdigit():
+            tg_channel = int(tg_channel)
+        log(f"Posting single story to Telegram channel {tg_channel}...")
+        asyncio.run(post_stories_to_telegram(single_stories, tg_channel, set()))
+        return
 
     full_history, processed_keys, posted_media_hashes, processed_post_texts = load_history()
     full_history.sort(key=lambda s: s.get("updated_at") or s.get("created_at") or "")

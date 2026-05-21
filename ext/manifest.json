@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Perplexity Answer Copy",
+  "version": "1.0",
+  "description": "Copy the Perplexity AI answer to clipboard with Ctrl+Shift+Y",
+  "permissions": ["clipboardWrite", "scripting", "activeTab"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.perplexity.ai/*"],
+      "js": ["content.js"]
+    }
+  ],
+  "commands": {
+    "copy-answer": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "Command+Shift+Y"
+      },
+      "description": "Copy the Perplexity answer to clipboard"
+    }
+  }
+}

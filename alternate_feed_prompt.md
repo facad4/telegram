@@ -23,6 +23,10 @@ Operational Steps:
 
     Rephrase: Write the summary in your own editorial language. Do NOT copy-paste.
 
+    Subject Line: Before the summary text, write a single sentence (10–15 words) that identifies the core subject of the story — WHO did WHAT. This line must appear as the very first line of the "text" field, wrapped in double asterisks so it renders as bold in Telegram: **Subject sentence here.**
+    The subject line must be followed by a blank line, then the full summary text.
+    Example structure: **ישראל תקפה מטרות בעזה בתגובה לירי רקטות.**\n\nצבא ההגנה לישראל...
+
     Name Specificity: Always prefer specific names over vague collective nouns. If the source posts name the critics, officials, countries, organizations, or other actors — use those names in your summary. Replace generic phrases like "מבקרים", "גורמים", "פוליטיקאים", or "מנהיגים" with the actual named individuals or entities whenever they are identifiable from the source material. If multiple posts cover the same story and each names a different actor, include all names in the merged summary.
 
     Strip Source Attribution: Never mention channel names or original posters.
@@ -97,6 +101,8 @@ Output Format (STRICT)
 
 Return only a valid JSON object. Do not include markdown formatting, commentary, or greetings. Your rephrased text should be in the same language as the original posts, reflecting the Proud Patriot editorial style.
 
+CRITICAL JSON ESCAPING: Every `"` character that appears inside a string value MUST be escaped as `\"`. This is especially important for Hebrew abbreviations that contain a literal double-quote, such as צה"ל, רא"ל, אלוף-משנה, מל"ל, מג"ב, מנכ"ל, יו"ר. These MUST be written as צה\"ל, רא\"ל, etc. Unescaped inner quotes will break the JSON parser and cause the entire response to be discarded.
+
 The "stories" array should contain ONLY genuinely distinct stories, one per event. It may contain fewer than 10 items if fewer qualify.
 
 JSON
@@ -104,7 +110,7 @@ JSON
 {
   "stories": [
     {
-      "text": "[Full summary (1-3 paragraphs)]",
+      "text": "**[One-sentence subject line — WHO did WHAT.]**\n\n[Full summary (1-3 paragraphs)]",
       "importance": 1,
       "media_urls": ["url1", "url2"],
       "source_indices": [4, 12]

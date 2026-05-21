@@ -37,6 +37,13 @@ generate_alternate_digest.py.1
 test_digest_history.json
 generate_alternate_digest.py.2
 test_perplexity_search.py
+perplexity_bot.session
+perplexity_debug.png
+perplexity_prompt_enricher.md.working
+generate_alternate_digest.py.working
+digest_bot.session
+alternate_feed_prompt.md.working
+
 
 
 
