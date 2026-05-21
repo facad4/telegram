@@ -10,5 +10,8 @@
   "context_provider": "mistral",
   "context_mistral_model": "mistral-large-latest",
   "context_tavily_depth": "advanced",
-  "context_tavily_max_results": 5
+  "context_tavily_max_results": 5,
+  "channel_ai_provider": "nim",
+  "channel_ai_model": "z-ai/glm-5.1",
+  "channel_max_stories": 5
 }

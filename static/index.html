@@ -1980,6 +1980,22 @@
       </div>
       <button class="add-btn" id="saveSettingsBtn" style="margin-top:10px;">Save Settings</button>
       <button class="add-btn" id="openComposeBtn" style="margin-top:8px; background: var(--accent);">✏️ Post to Channel</button>
+      <button class="add-btn" id="openImageUploadBtn" style="margin-top:8px; background: var(--accent);">🖼️ Upload Image to Channel</button>
+    </div>
+  </div>
+
+  <!-- Image upload modal -->
+  <div id="imageUploadModalOverlay" style="display:none; position:fixed; inset:0; z-index:2000; background:rgba(0,0,0,0.6); align-items:center; justify-content:center;">
+    <div id="imageUploadModal" style="background:var(--card-bg); border-radius:12px; padding:24px; width:min(680px,95vw); max-height:90vh; display:flex; flex-direction:column; gap:14px; box-shadow:0 8px 32px rgba(0,0,0,0.4); position:relative;">
+      <button onclick="closeImageUploadModal()" style="position:absolute; top:12px; right:14px; background:none; border:none; font-size:1.4rem; cursor:pointer; color:var(--text); opacity:0.6; line-height:1;">✕</button>
+      <h3 style="margin:0; font-size:1.1rem;">Upload Image to Telegram Channel</h3>
+      <input type="file" id="imageUploadFile" accept="image/*" style="padding:8px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:0.95rem; width:100%; box-sizing:border-box;">
+      <textarea id="imageUploadCaption" rows="4" placeholder="Caption (optional). Adds a 'Tell me more' button when provided." style="resize:vertical; padding:10px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:0.95rem; font-family:inherit; width:100%; box-sizing:border-box;"></textarea>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <button class="add-btn" id="uploadImgTestBtn" onclick="sendImageToChannel('test')" style="flex:1; min-width:140px;">Send to Test Channel</button>
+        <button class="add-btn" id="uploadImgProdBtn" onclick="sendImageToChannel('production')" style="flex:1; min-width:160px; background:#ef5350;">Send to Production</button>
+      </div>
+      <div id="imageUploadStatus" style="font-size:0.88rem; min-height:1.2em; color:var(--text-secondary);"></div>
     </div>
   </div>
 
@@ -3964,6 +3980,65 @@
       }
     }
 
+    function openImageUploadModal() {
+      const overlay = document.getElementById('imageUploadModalOverlay');
+      overlay.style.display = 'flex';
+      document.getElementById('imageUploadFile').value = '';
+      document.getElementById('imageUploadCaption').value = '';
+      document.getElementById('imageUploadStatus').textContent = '';
+      document.getElementById('uploadImgTestBtn').disabled = false;
+      document.getElementById('uploadImgProdBtn').disabled = false;
+    }
+
+    function closeImageUploadModal() {
+      document.getElementById('imageUploadModalOverlay').style.display = 'none';
+    }
+
+    async function sendImageToChannel(target) {
+      const fileInput = document.getElementById('imageUploadFile');
+      const caption = document.getElementById('imageUploadCaption').value;
+      const status = document.getElementById('imageUploadStatus');
+      if (!fileInput.files || !fileInput.files.length) {
+        status.style.color = '#ef5350';
+        status.textContent = 'Please choose an image first.';
+        return;
+      }
+      const testBtn = document.getElementById('uploadImgTestBtn');
+      const prodBtn = document.getElementById('uploadImgProdBtn');
+      testBtn.disabled = true;
+      prodBtn.disabled = true;
+      status.style.color = 'var(--text-secondary)';
+      status.textContent = 'Uploading…';
+
+      const fd = new FormData();
+      fd.append('image', fileInput.files[0]);
+      fd.append('caption', caption);
+      fd.append('target', target);
+
+      try {
+        const res = await authFetch('/api/admin/upload-image-to-channel', {
+          method: 'POST',
+          body: fd,
+        });
+        if (res.ok) {
+          status.style.color = '#4caf50';
+          status.textContent = '✓ Sent!';
+          setTimeout(closeImageUploadModal, 1800);
+        } else {
+          const err = await res.json().catch(() => ({}));
+          status.style.color = '#ef5350';
+          status.textContent = err.detail || 'Failed to send.';
+          testBtn.disabled = false;
+          prodBtn.disabled = false;
+        }
+      } catch (e) {
+        status.style.color = '#ef5350';
+        status.textContent = 'Network error.';
+        testBtn.disabled = false;
+        prodBtn.disabled = false;
+      }
+    }
+
     async function saveAdminSettings() {
       const config = {
         refresh_interval_minutes: parseInt(document.getElementById('refreshInterval').value),
@@ -4088,6 +4163,7 @@
       document.getElementById('loadPrivateChannelsBtn').addEventListener('click', loadPrivateChannels);
       document.getElementById('saveSettingsBtn').addEventListener('click', saveAdminSettings);
       document.getElementById('openComposeBtn').addEventListener('click', openComposeModal);
+      document.getElementById('openImageUploadBtn').addEventListener('click', openImageUploadModal);
       document.getElementById('aiProvider').addEventListener('change', (e) => {
         updateAiModelOptions(e.target.value);
       });

@@ -16,7 +16,7 @@ import httpx
 import jwt
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from telethon import TelegramClient, Button, functions
@@ -1255,6 +1255,56 @@ async def compose_to_channel(request: Request, user: dict = Depends(require_auth
         return {"status": "success"}
     except Exception as e:
         logger.error("Failed to compose post to Telegram channel: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to send: {e}")
+
+
+@app.post("/api/admin/upload-image-to-channel")
+async def upload_image_to_channel(
+    request: Request,
+    image: UploadFile = File(...),
+    caption: str = Form(""),
+    target: str = Form("test"),
+    user: dict = Depends(require_auth),
+):
+    if user["user_id"] != 1:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    if target == "test":
+        channel = os.environ.get("TEST_DIGEST_TELEGRAM_CHANNEL")
+        if not channel:
+            raise HTTPException(status_code=503, detail="TEST_DIGEST_TELEGRAM_CHANNEL not configured")
+    elif target == "production":
+        channel = os.environ.get("DIGEST_TELEGRAM_CHANNEL")
+        if not channel:
+            raise HTTPException(status_code=503, detail="DIGEST_TELEGRAM_CHANNEL not configured")
+    else:
+        raise HTTPException(status_code=400, detail="target must be 'test' or 'production'")
+    bot: TelegramClient | None = request.app.state.bot
+    tg: TelegramClient | None = request.app.state.telegram
+    sender = bot or tg
+    if not sender:
+        raise HTTPException(status_code=503, detail="Telegram client not available")
+    data = await image.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="image is empty")
+    buf = io.BytesIO(data)
+    buf.name = image.filename or "upload.jpg"
+    has_caption = bool(caption.strip())
+    buttons = [[Button.inline("ספר לי עוד על זה", b"px")]] if (bot and has_caption) else None
+    try:
+        entity = await sender.get_entity(int(channel) if channel.lstrip("-").isdigit() else channel)
+        await sender.send_file(
+            entity,
+            file=buf,
+            caption=caption if has_caption else None,
+            buttons=buttons,
+        )
+        logger.info(
+            "User '%s' uploaded image (%d bytes) to %s Telegram channel '%s'",
+            user["user_name"], len(data), target, channel,
+        )
+        return {"status": "success", "size": len(data), "target": target}
+    except Exception as e:
+        logger.error("Failed to upload image to Telegram channel: %s", e)
         raise HTTPException(status_code=500, detail=f"Failed to send: {e}")
 
 

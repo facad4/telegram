@@ -1023,12 +1023,20 @@ def main():
     config = load_config()
     provider = build_provider(config)
     max_posts_per_call = int(config.get("channel_max_posts_per_call", 100))
+    max_stories = int(config.get("channel_max_stories", 5))
 
     try:
         prompt = PROMPT_PATH.read_text(encoding="utf-8")
     except FileNotFoundError:
         log(f"Error: prompt file not found at {PROMPT_PATH}", error=True)
         sys.exit(1)
+    prompt += (
+        f"\n\n## Story Count Override (MANDATORY)\n"
+        f"SELECT AT MOST {max_stories} STORIES. "
+        f"Wherever the instructions above reference '10' as the maximum story count, "
+        f"treat {max_stories} as the actual limit instead. "
+        f"Keep only the top {max_stories} by importance ranking."
+    )
 
     log(f"Logging in to {base_url} as {username}...")
     token = login(base_url, username, password)
