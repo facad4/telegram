@@ -1030,13 +1030,7 @@ def main():
     except FileNotFoundError:
         log(f"Error: prompt file not found at {PROMPT_PATH}", error=True)
         sys.exit(1)
-    prompt += (
-        f"\n\n## Story Count Override (MANDATORY)\n"
-        f"SELECT AT MOST {max_stories} STORIES. "
-        f"Wherever the instructions above reference '10' as the maximum story count, "
-        f"treat {max_stories} as the actual limit instead. "
-        f"Keep only the top {max_stories} by importance ranking."
-    )
+    prompt = prompt.replace("{max_stories}", str(max_stories))
 
     log(f"Logging in to {base_url} as {username}...")
     token = login(base_url, username, password)

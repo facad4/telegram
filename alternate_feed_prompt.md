@@ -17,7 +17,7 @@ Operational Steps:
 
     Deduplicate: Identify posts covering the same story or event across different channels.
 
-    Select: Choose up to 10 of the most important stories based on the ranking criteria below. The count may be less than 10 if fewer qualify, but NEVER more than 10.
+    Select: Choose up to {max_stories} of the most important stories based on the ranking criteria below. The count may be less than {max_stories} if fewer qualify, but NEVER more than {max_stories}.
 
     Merge: Combine all facts, unique details, and perspectives from duplicate posts about the same specific event into one comprehensive item. Never merge posts about different events or unrelated topics into a single story, even if they share a broad theme (e.g. "world news" or "military"). Two new posts that describe the same incident from different angles or with different emphasis (e.g. one focuses on the military operation and another on the political framing of the same operation) are STILL the same event and MUST be merged into a single output story. Your output must NEVER contain two stories about the same event.
 
@@ -103,7 +103,7 @@ Return only a valid JSON object. Do not include markdown formatting, commentary,
 
 CRITICAL JSON ESCAPING: Every `"` character that appears inside a string value MUST be escaped as `\"`. This is especially important for Hebrew abbreviations that contain a literal double-quote, such as צה"ל, רא"ל, אלוף-משנה, מל"ל, מג"ב, מנכ"ל, יו"ר. These MUST be written as צה\"ל, רא\"ל, etc. Unescaped inner quotes will break the JSON parser and cause the entire response to be discarded.
 
-The "stories" array should contain ONLY genuinely distinct stories, one per event. It may contain fewer than 10 items if fewer qualify.
+The "stories" array should contain ONLY genuinely distinct stories, one per event. It may contain fewer than {max_stories} items if fewer qualify.
 
 JSON
 
@@ -144,6 +144,6 @@ After you have generated your initial list of output stories, you MUST perform a
 
     Step 3 — Source audit: For EVERY story, verify "source_indices" is not empty and every index is a valid index from the "new_posts" array (0 to length-1). Remove any story with empty or invalid source_indices.
 
-    Step 4 — Final count: After removing invalid stories, verify you have at most 10 stories. If more remain, keep only the top 10 by importance.
+    Step 4 — Final count: After removing invalid stories, verify you have at most {max_stories} stories. If more remain, keep only the top {max_stories} by importance.
 
 Only return the JSON after completing all verification steps.

@@ -569,6 +569,17 @@ def resolve_media_urls(stories: list[dict], original_posts: list[dict], base_url
         thumb_resolved = []
         seen_fingerprints: set[str] = set()
 
+        # Pre-scan: collect fingerprints of video thumbnails so they are not
+        # mistakenly placed in media_urls (they belong in video_thumb_urls only).
+        video_thumb_fps: set[str] = set()
+        for idx in story.get("source_indices", []):
+            if 0 <= idx < len(original_posts):
+                vt = original_posts[idx].get("video_thumb") or ""
+                if vt:
+                    abs_vt = _abs_url(vt, base_url)
+                    if abs_vt:
+                        video_thumb_fps.add(_media_url_fingerprint(abs_vt))
+
         def _try_add(url: str | None, target: list) -> None:
             if not url:
                 return
@@ -585,6 +596,9 @@ def resolve_media_urls(stories: list[dict], original_posts: list[dict], base_url
             target.append(abs)
 
         for url in story.get("media_urls", []):
+            abs_u = _abs_url(url, base_url)
+            if abs_u and _media_url_fingerprint(abs_u) in video_thumb_fps:
+                continue  # video thumbnail — source_indices loop will add it to thumb_resolved
             _try_add(url, resolved)
         for idx in story.get("source_indices", []):
             if 0 <= idx < len(original_posts):
