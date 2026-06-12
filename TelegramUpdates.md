@@ -305,6 +305,27 @@ Forwards a post from any channel to the configured `DIGEST_TELEGRAM_CHANNEL` via
 - 403: Non-admin user
 - 503: Telegram client not configured
 
+#### `POST /api/admin/upload-image-to-channel` (protected, admin-only)
+Uploads an image file to a configured Telegram channel via the bot or user client.
+
+**Request**: multipart/form-data
+- `image` (file, required): Image to send
+- `caption` (string, optional): Caption text. When provided and a bot client is available, a Perplexity inline button ("ספר לי עוד על זה") is attached
+- `target` (string, required): `"test"` (uses `TEST_DIGEST_TELEGRAM_CHANNEL`) or `"production"` (uses `DIGEST_TELEGRAM_CHANNEL`)
+
+**Success response** (200):
+```json
+{ "status": "success", "size": 123456, "target": "test" }
+```
+
+**Error responses**:
+- 400: Empty image or invalid `target` value
+- 403: Non-admin user
+- 503: Required channel env var not configured, or no Telegram client available
+- 500: Telegram send failure
+
+**Implementation**: Prefers the bot client (`app.state.bot`) so the Perplexity inline button can be attached; falls back to the user client (`app.state.telegram`) if no bot is configured.
+
 #### `POST /api/top-posts` (protected)
 Sends the user's current feed posts to a configurable AI provider (Google Gemini, Mistral, or Groq) for importance ranking, returns the top 10.
 
@@ -1086,7 +1107,7 @@ python generate_alternate_digest.py [options]
    - `check_story_against_history()` classifies each returned story as "duplicate" (threshold 0.88), "update" (threshold 0.70), or "new"
    - Duplicates are discarded
    - Updates are collected and sent as a batch to `rewrite_updates_batch()` which extracts only genuinely new facts in a single AI call
-8. **Media URL Resolution**: Converts relative `/api/` media URLs to absolute URLs using the server base URL; includes `photo_url`, `video_thumb`, and `link_preview.image` fallbacks. Uses URL-path fingerprinting (Layer 1 dedup) to eliminate CDN variants of the same image before downloading; intra-story and cross-story duplicate image removal (Layers 1.5 and 1.75)
+8. **Media URL Resolution**: Converts relative `/api/` media URLs to absolute URLs using the server base URL; includes `photo_url`, `video_thumb`, and `link_preview.image` fallbacks. Uses URL-path fingerprinting (Layer 1 dedup) to eliminate CDN variants of the same image before downloading; intra-story and cross-story duplicate image removal (Layers 1.5 and 1.75). A pre-scan of video thumbnail URLs builds a fingerprint set before processing `media_urls`, preventing video thumbnails from being duplicated in `media_urls` (they are kept exclusively in `video_thumb_urls`)
 9. **Save History**: Appends new stories to `full_history`. Updates are appended with a `parent_index` linking to the original story. All raw post keys and their texts from the current batch are saved to `processed_post_keys` and `processed_post_texts`. Persists `posted_media_hashes` for cross-run media dedup. Writes to `digest_history.json`
 10. **Video URL Resolution** (optional, only when Telegram posting is enabled): Scans source posts referenced by each story's `source_indices` for `has_video=true`. For public channels, scrapes the Telegram embed page (`https://t.me/{channel}/{post_id}?embed=1`) to extract the direct CDN video URL from the `<video>` tag. Private channel videos are skipped (their thumbnails are still posted as images). Cross-story video URL deduplication applied. Collected URLs are stored in a `video_urls` list on each story
 11. **Telegram Channel Posting** (optional): If `DIGEST_TELEGRAM_CHANNEL` is set and Telegram credentials are configured, posts each new story and update to the target channel. When `TELEGRAM_BOT_TOKEN` is available, uses the bot client which attaches a Perplexity inline button; otherwise falls back to user client. Updates are prefixed with "**עדכון**". Media images are downloaded into memory (max 10 images, 5 videos per story), deduplicated by content hash (Layer 2: within-run, Layer 3: cross-run via persisted `posted_media_hashes`), and sent as photo albums. Videos are downloaded from CDN URLs (120s timeout) and uploaded individually with `supports_streaming=True`. Images are sent first (as album with caption), then videos (2s delay between each). Text-only stories are sent as plain messages. Posts are spaced 1.5s apart to avoid rate limits. Failures are logged but non-fatal
@@ -1119,7 +1140,7 @@ python generate_alternate_digest.py [options]
 - `check_story_against_history(story, history, threshold_duplicate=0.88, threshold_update=0.70) -> tuple`: Classifies a generated story as "duplicate", "update", or "new" against the full history
 - `rewrite_updates_batch(pairs, provider) -> list[dict]`: Single AI call to rewrite all pending updates, extracting only genuinely new facts; pairs are `[{index, new_story, existing_story}, ...]`
 - `_media_url_fingerprint(url) -> str`: Extracts a stable fingerprint from a URL by stripping query params and isolating the path tail (Layer 1 dedup)
-- `resolve_media_urls(stories, original_posts, base_url) -> list[dict]`: Converts relative media URLs to absolute with URL-path fingerprint dedup (Layers 1, 1.5, 1.75)
+- `resolve_media_urls(stories, original_posts, base_url) -> list[dict]`: Converts relative media URLs to absolute with URL-path fingerprint dedup (Layers 1, 1.5, 1.75); pre-scans video thumbnail fingerprints to prevent them from being duplicated in `media_urls`
 - `scrape_video_cdn_url(channel, post_id) -> str | None`: Scrapes Telegram's embed page to extract the direct CDN video URL from the `<video>` tag; public channels only
 - `resolve_video_urls(stories, original_posts) -> list[dict]`: Scans source posts for `has_video=true`, scrapes CDN URLs, populates `video_urls` list on each story; skips private channels; applies cross-story URL dedup
 - `connect_telegram() -> TelegramClient | None`: Creates and connects a Telethon user client; returns `None` if credentials are missing or session is unauthorized
@@ -1132,12 +1153,14 @@ python generate_alternate_digest.py [options]
 
 System prompt used by the standalone digest script for Mistral AI processing. Contains six sections:
 
-1. **Core Task**: Operational steps — deduplicate, select (up to 10), merge same-event posts, rephrase, strip source attribution, enforce temporal accuracy, topical coherence, source constraint, and media preservation
+1. **Core Task**: Operational steps — deduplicate, select (up to `{max_stories}` stories, substituted at runtime), merge same-event posts, rephrase, strip source attribution, enforce temporal accuracy, topical coherence, source constraint, and media preservation
 2. **Persona**: "The Proud Patriot" (הפטריוט הגאה) — constructive Zionist editorial voice with nationalism, directness, love for Israel, and a loyalty rule for internal challenges
 3. **Ranking & Selection Criteria**: Impact, relevancy, engagement ratio, cross-references, depth & media; exclusions for missile alerts, promotional content, and donation appeals
 4. **Input & Output Format**: Receives `{"new_posts": [...], "previously_generated": [...]}`. The `previously_generated` array is READ-ONLY context for deduplication — never a source for generating new content. Returns `{"stories": [...]}` with `history_index` (null for new stories, index for updates) and `source_indices` referencing `new_posts`
-5. **Incremental History Updates**: Mandatory duplicate check against entire `previously_generated` array using event-based matching (WHO, WHAT, WHERE, WHEN — not wording). Includes: reactions/commentary = same event rule, check updates too, within-batch dedup, concrete Hebrew examples of same-event matches. Updates must contain genuinely new facts from `new_posts`; pure duplicates are skipped. Variable output count (0 to 10, never more)
-6. **Final Verification** (5 steps, mandatory before returning): self-dedup, history cross-check, update content check, final count cap, source audit (every output item must have valid `source_indices` from `new_posts`)
+5. **Incremental History Updates**: Mandatory duplicate check against entire `previously_generated` array using event-based matching (WHO, WHAT, WHERE, WHEN — not wording). Includes: reactions/commentary = same event rule, check updates too, within-batch dedup, concrete Hebrew examples of same-event matches. Updates must contain genuinely new facts from `new_posts`; pure duplicates are skipped. Variable output count (0 to `{max_stories}`, never more)
+6. **Final Verification** (5 steps, mandatory before returning): self-dedup, history cross-check, update content check, final count cap (at most `{max_stories}`), source audit (every output item must have valid `source_indices` from `new_posts`)
+
+**Dynamic story cap**: The `{max_stories}` placeholder in the prompt is replaced at runtime via `prompt.replace("{max_stories}", str(max_stories))`, allowing the story limit to be adjusted without editing the prompt file.
 
 ## Known Limitations
 
@@ -1186,6 +1209,7 @@ System prompt used by the standalone digest script for Mistral AI processing. Co
 - `_merge_grouped_posts(posts) -> list[dict]`: Post-processing for HTML-scraped posts; detects consecutive post IDs with missing text (media album groups) and merges them into single posts
 - `_merge_telethon_grouped(posts) -> list[dict]`: Post-processing for Telethon-fetched posts; uses `grouped_id` to merge album messages into single posts
 - `share_to_channel(request, user)`: `POST /api/admin/share-to-channel` -- admin-only; forwards a post to `DIGEST_TELEGRAM_CHANNEL` via Telethon
+- `upload_image_to_channel(request, image, caption, target, user)`: `POST /api/admin/upload-image-to-channel` -- admin-only; reads uploaded image bytes, sends to the target Telegram channel (test or production) via bot or user client; attaches Perplexity inline button when caption is provided and bot client is available
 - `get_avatar(channel_key, user)`: `GET /api/avatar/{channel_key}` -- serves cached channel avatar as JPEG
 - `get_thumb(thumb_key, user)`: `GET /api/thumb/{thumb_key}` -- serves cached post thumbnail; downloads on demand if not cached
 - `get_video(video_key, request, user)`: `GET /api/video/{video_key}` -- streams cached video with range request support (206 Partial Content)
@@ -1244,6 +1268,8 @@ System prompt used by the standalone digest script for Mistral AI processing. Co
 - `applyAutoHideHeader()`: Attaches scroll listener for auto-hiding the header on mobile
 - `hideHeader()` / `showHeader()`: Slide header out of / back into view
 - `toggleAutoHideHeader(enabled)`: Enables or disables auto-hide header behavior
+- `openImageUploadModal()` / `closeImageUploadModal()`: Opens/closes the image upload modal in the admin management panel
+- `sendImageToChannel(target)`: Reads the selected file and caption, submits a multipart `POST /api/admin/upload-image-to-channel` request; disables buttons during upload, shows success/error feedback
 - `loadManagementInterface()`: Loads feed list, private channels section (admin), alternate feed management (admin), and settings (admin)
 - `loadFeedList()`: Fetches and renders user's main feeds from `/api/feeds` (excluding `is_alternate=true`) with Private/Admin badges
 - `addFeed()`: Adds a feed via `POST /api/feeds` with duplicate error display
@@ -1384,3 +1410,12 @@ System prompt used by the standalone digest script for Mistral AI processing. Co
 - **AI Model**: Model selector populated dynamically based on selected provider (Gemini: gemini-2.0-flash-lite, gemini-2.0-flash, gemini-2.5-flash-lite, gemini-2.5-flash, gemini-2.5-pro; Mistral: mistral-small-latest, mistral-medium-latest, mistral-large-latest; Groq: llama-3.3-70b-versatile, llama-3.1-8b-instant, etc.)
 - **Visibility**: Settings section is only shown when `localStorage.getItem('is_admin') === 'true'`
 - **Persistence**: Saved via `POST /api/admin/config` which overwrites `config.json`
+
+### Image Upload (Admin Only)
+- **Access**: "Upload Image to Channel" button in the admin management panel
+- **Modal**: Full-screen overlay with file picker (image/* filter), caption textarea, and two send buttons
+  - **Send to Test Channel**: Posts to `TEST_DIGEST_TELEGRAM_CHANNEL`
+  - **Send to Production** (red button): Posts to `DIGEST_TELEGRAM_CHANNEL`
+- **Perplexity button**: When a caption is provided and a bot client is configured, the Telegram post automatically gets a "ספר לי עוד על זה" inline button
+- **Feedback**: Buttons are disabled during upload; success closes the modal after 1.8s; errors display inline in red
+- **Implementation**: Submits via `POST /api/admin/upload-image-to-channel` (multipart form) through `authFetch`
