@@ -1,10 +1,10 @@
 """
-Long-running Telegram bot listener for the Perplexity-per-post button.
+Long-running Telegram bot listener for the per-post enrichment button.
 
-When a viewer taps the inline "🔍 מידע נוסף מ-Perplexity" button on a
-bot-sent channel post, this listener runs PerplexitySearch fresh and edits
-the channel message to append (or replace) an expandable blockquote with
-the latest answer + sources.
+When a viewer taps the inline "ספר לי עוד על זה" button on a bot-sent
+channel post, this listener runs Mistral + Tavily web search fresh (via
+WebSearch, using the enricher prompt) and edits the channel message to
+append an expandable blockquote with the enriched answer.
 
 Run via systemd / Task Scheduler / NSSM:
     python perplexity_listener.py
@@ -13,10 +13,12 @@ Run via systemd / Task Scheduler / NSSM:
 import argparse
 import asyncio
 import ctypes
+import json
 import logging
 import os
 import re
 import time
+from pathlib import Path
 
 _ES_CONTINUOUS        = 0x80000000
 _ES_SYSTEM_REQUIRED   = 0x00000001
@@ -25,11 +27,20 @@ _ES_DISPLAY_REQUIRED  = 0x00000002
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 
-from perplexity_browser import PerplexityBrowser
-from perplexity_search import PerplexitySearchError
 from perplexity_marker import PX_MARKER
+from web_search import WebSearch
 
 load_dotenv()
+
+
+def _load_config() -> dict:
+    """Read config.json (Mistral/Tavily settings for the enricher)."""
+    try:
+        path = Path(__file__).parent / "config.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("Could not read config.json (%s); using defaults.", e)
+        return {}
 
 API_ID = int(os.environ["TELEGRAM_API_ID"])
 API_HASH = os.environ["TELEGRAM_API_HASH"]
@@ -65,18 +76,50 @@ def _html_escape(text: str) -> str:
     )
 
 
-_STREAM_WAIT_S = 20  # must match time.sleep() in perplexity_browser._search_sync
+_STREAM_WAIT_S = 40  # nominal loader duration (the loop is cancelled when the answer is ready)
+_PHASE_POLL_S = 2.0  # how often to check for a phase change (edits happen only on change)
+
+# Friendly narration of the enrichment stages, keyed by elapsed seconds. Loosely
+# tracks the real Mistral + Tavily steps (load, search, filter, summarize, verify).
+_PHASES = [
+    (0, "🔍", "טוען את הפוסט"),
+    (5, "🌐", "מחפש ברשת"),
+    (10, "🌐", "מסנן תוצאות"),
+    (15, "🧠", "מנתח ומסכם"),
+    (20, "🧠", "מוודא סיכום"),
+    (25, "✍️", "מכין את הפוסט"),
+    (30, "✍️", "מסיים"),
+    (35, "📌", "ממש תיכף מוכן"),
+]
+
+
+def _phase_for(elapsed: float) -> tuple[str, str]:
+    """Return the (emoji, label) for the latest stage reached at `elapsed`."""
+    emoji, label = _PHASES[0][1], _PHASES[0][2]
+    for start, e, lbl in _PHASES:
+        if elapsed >= start:
+            emoji, label = e, lbl
+    return emoji, label
 
 
 async def _run_progress_bar(bot, peer_id, msg_id, original: str, total: int = _STREAM_WAIT_S) -> None:
-    for step in range(1, total + 1):
-        bar = "|" + "." * step + " " * (total - step) + "|"
-        text = original + "\n\n" + PX_MARKER + f"\n<blockquote expandable><code>{bar}</code></blockquote>"
-        try:
-            await bot.edit_message(peer_id, msg_id, text, parse_mode="html")
-        except Exception:
-            pass
-        await asyncio.sleep(1)
+    """Narrate the current pipeline stage. Edits the message ONLY when the phase
+    changes (~4 edits over the whole run), which avoids the Telegram edit flood
+    waits the earlier per-frame scanner hit (29s EditMessageRequest waits)."""
+    last_label = None
+    elapsed = 0.0
+    while True:
+        emoji, label = _phase_for(elapsed)
+        if label != last_label:
+            body = f"{emoji} {label}…"
+            text = original + "\n\n" + PX_MARKER + f"\n<blockquote expandable>{body}</blockquote>"
+            try:
+                await bot.edit_message(peer_id, msg_id, text, parse_mode="html")
+            except Exception:
+                pass
+            last_label = label
+        await asyncio.sleep(_PHASE_POLL_S)
+        elapsed += _PHASE_POLL_S
 
 
 def _build_blockquote_html(summary: str) -> str:
@@ -121,7 +164,7 @@ async def on_perplexity_click(event):
             return
 
         _last_run_per_msg[key] = now
-        await event.answer("⏳ מריץ Perplexity...", cache_time=0)
+        await event.answer("⏳ מעשיר את הפוסט...", cache_time=0)
 
         char_limit = 1024 if msg.media else 4096
         formatting_overhead = len("\n\n") + len(PX_MARKER) + len("\n<blockquote expandable></blockquote>") + 50
@@ -131,15 +174,19 @@ async def on_perplexity_click(event):
             _run_progress_bar(bot, msg.peer_id, msg.id, original)
         )
 
+        config = _load_config()
         async with _sem:
             try:
-                result = await PerplexityBrowser(
-                    prompt_file="perplexity_prompt_enricher.md",
+                result = await WebSearch(
+                    mistral_model=config.get("context_mistral_model", "mistral-large-latest"),
+                    search_depth=config.get("context_tavily_depth", "advanced"),
+                    max_results=config.get("context_tavily_max_results", 5),
+                    summarize_prompt_file="perplexity_prompt_enricher.md",
                 ).search(original, max_chars=max_summary_chars)
-            except PerplexitySearchError as e:
+            except Exception as e:
                 bar_task.cancel()
-                logger.error("Perplexity failed: %s", e)
-                await event.answer(f"Perplexity נכשל: {e}", alert=True)
+                logger.error("Enrichment failed: %s", e)
+                await event.answer(f"העשרה נכשלה: {e}", alert=True)
                 await bot.edit_message(msg.peer_id, msg.id, original, parse_mode="html")
                 return
 

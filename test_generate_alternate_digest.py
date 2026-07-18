@@ -35,6 +35,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from telethon import TelegramClient, Button
 from telethon.sessions import StringSession
+from perplexity_marker import PX_BUTTON_LABEL
 
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -717,7 +718,7 @@ async def post_stories_to_telegram(
 
     bot_client = await connect_telegram_bot()
     sender = bot_client if bot_client is not None else client
-    buttons = [[Button.inline("ספר לי עוד על זה", b"px")]] if bot_client else None
+    buttons = [[Button.inline(PX_BUTTON_LABEL, b"px")]] if bot_client else None
     if bot_client is not None:
         log("Posting via bot client (Perplexity button enabled).")
 
@@ -1023,7 +1024,7 @@ def main():
     config = load_config()
     provider = build_provider(config)
     max_posts_per_call = int(config.get("channel_max_posts_per_call", 100))
-    max_stories = int(config.get("channel_max_stories", 5))
+    max_stories = int(config.get("channel_max_stories", 3))
 
     try:
         prompt = PROMPT_PATH.read_text(encoding="utf-8")

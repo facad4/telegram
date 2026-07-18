@@ -32,6 +32,7 @@ class WebSearch:
         mistral_model: str = "mistral-large-latest",
         search_depth: str = "basic",
         max_results: int = 5,
+        summarize_prompt_file: str = "summarize.md",
     ):
         """Initialize WebSearch with API keys.
 
@@ -41,6 +42,9 @@ class WebSearch:
             mistral_model: Mistral model to use (default: mistral-large-latest)
             search_depth: Tavily search depth - "basic" or "advanced" (default: basic)
             max_results: Maximum number of search results to fetch (default: 5)
+            summarize_prompt_file: Prompt file used for the summarization step
+                (default: summarize.md). The listener overrides this with the
+                enricher prompt to keep its own output style.
         """
         self.mistral_api_key = mistral_api_key or os.environ.get("MISTRAL_API_KEY", "")
         self.tavily_api_key = tavily_api_key or os.environ.get("TAVILY_API_KEY", "")
@@ -54,7 +58,7 @@ class WebSearch:
             raise ValueError("TAVILY_API_KEY is required")
 
         self.search_terms_prompt = self._load_prompt("search_terms.md")
-        self.summarize_prompt = self._load_prompt("summarize.md")
+        self.summarize_prompt = self._load_prompt(summarize_prompt_file)
 
     def _load_prompt(self, filename: str) -> str:
         """Load a prompt file from disk."""
@@ -174,7 +178,7 @@ class WebSearch:
                 raise Exception(f"Tavily API request failed: {str(e)}")
 
     async def _summarize_results(
-        self, post_text: str, web_results: list[dict]
+        self, post_text: str, web_results: list[dict], max_chars: int = 0
     ) -> str:
         """Summarize web search results using Mistral.
 
@@ -197,11 +201,18 @@ class WebSearch:
             results_text += f"URL: {result['url']}\n"
             results_text += f"Content: {result['content']}\n"
         
+        system_prompt = self.summarize_prompt
+        if max_chars > 0:
+            system_prompt += (
+                f"\n\nIMPORTANT: Your entire answer MUST be under {max_chars} "
+                "characters. Be concise and stay within this limit."
+            )
+
         logger.info("Summarizing web results with Mistral")
-        summary = await self._call_mistral(self.summarize_prompt, results_text)
+        summary = await self._call_mistral(system_prompt, results_text)
         return summary
 
-    async def search(self, post_text: str) -> dict:
+    async def search(self, post_text: str, max_chars: int = 0) -> dict:
         """Search the web and summarize results for a Telegram post.
 
         This is the main method that orchestrates the entire workflow:
@@ -211,6 +222,9 @@ class WebSearch:
 
         Args:
             post_text: The Telegram post text to analyze
+            max_chars: If > 0, instruct the model to keep its answer under this
+                many characters (used by the listener to fit Telegram's limit).
+                Default 0 leaves the summarization prompt unconstrained.
 
         Returns:
             Dictionary with:
@@ -227,8 +241,8 @@ class WebSearch:
             search_terms = await self._generate_search_terms(post_text)
             
             web_results = await self._search_web(search_terms)
-            
-            summary = await self._summarize_results(post_text, web_results)
+
+            summary = await self._summarize_results(post_text, web_results, max_chars)
             
             sources = [
                 {"title": result["title"], "url": result["url"]}

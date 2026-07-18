@@ -1031,9 +1031,10 @@ def main():
     config = load_config()
     provider = build_provider(config)
     max_posts_per_call = int(config.get("channel_max_posts_per_call", 100))
+    max_stories = int(config.get("channel_max_stories", 3))
 
     try:
-        prompt = PROMPT_PATH.read_text(encoding="utf-8")
+        prompt = PROMPT_PATH.read_text(encoding="utf-8").replace("{max_stories}", str(max_stories))
     except FileNotFoundError:
         log(f"Error: prompt file not found at {PROMPT_PATH}", error=True)
         sys.exit(1)

@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from telethon import TelegramClient, Button, functions
 from telethon.sessions import StringSession
+from perplexity_marker import PX_BUTTON_LABEL
 from telethon.tl.types import Channel, Chat, MessageMediaPhoto, MessageMediaDocument, PeerChannel, DocumentAttributeVideo
 from google import genai
 from google.genai import types
@@ -1244,7 +1245,7 @@ async def compose_to_channel(request: Request, user: dict = Depends(require_auth
     sender = bot or tg
     if not sender:
         raise HTTPException(status_code=503, detail="Telegram client not available")
-    buttons = [[Button.inline("ספר לי עוד על זה", b"px")]] if bot else None
+    buttons = [[Button.inline(PX_BUTTON_LABEL, b"px")]] if bot else None
     try:
         entity = await sender.get_entity(int(channel) if channel.lstrip("-").isdigit() else channel)
         await sender.send_message(entity, text, link_preview=True, buttons=buttons)
@@ -1289,7 +1290,7 @@ async def upload_image_to_channel(
     buf = io.BytesIO(data)
     buf.name = image.filename or "upload.jpg"
     has_caption = bool(caption.strip())
-    buttons = [[Button.inline("ספר לי עוד על זה", b"px")]] if (bot and has_caption) else None
+    buttons = [[Button.inline(PX_BUTTON_LABEL, b"px")]] if (bot and has_caption) else None
     try:
         entity = await sender.get_entity(int(channel) if channel.lstrip("-").isdigit() else channel)
         await sender.send_file(
