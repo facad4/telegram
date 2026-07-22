@@ -35,6 +35,7 @@ digest.log
 test_alternate_digest.html
 generate_alternate_digest.py.1
 test_digest_history.json
+test_nim_key_state.json
 generate_alternate_digest.py.2
 test_perplexity_search.py
 perplexity_bot.session
