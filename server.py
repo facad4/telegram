@@ -770,6 +770,106 @@ async def get_alternate_posts(request: Request, user: dict = Depends(require_aut
     return all_posts[:max_posts]
 
 
+def _digest_channel_ref() -> int | str:
+    channel = os.environ.get("DIGEST_TELEGRAM_CHANNEL")
+    if not channel:
+        raise HTTPException(status_code=503, detail="DIGEST_TELEGRAM_CHANNEL not configured")
+    return int(channel) if channel.lstrip("-").isdigit() else channel
+
+
+async def _digest_write_clients(request: Request) -> list[TelegramClient]:
+    """Prefer bot, then user client, for edit/delete on the digest channel."""
+    bot: TelegramClient | None = request.app.state.bot
+    tg: TelegramClient | None = request.app.state.telegram
+    clients = [c for c in (bot, tg) if c is not None]
+    if not clients:
+        raise HTTPException(status_code=503, detail="Telegram client not available")
+    return clients
+
+
+@app.get("/api/channel-posts")
+async def get_channel_posts(request: Request, user: dict = Depends(require_auth)):
+    """Return posts from DIGEST_TELEGRAM_CHANNEL (admin only)."""
+    if user.get("user_id") != 1:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    channel_ref = _digest_channel_ref()
+    tg: TelegramClient | None = request.app.state.telegram
+    if not tg:
+        raise HTTPException(status_code=503, detail="Telegram client not available")
+
+    config = load_config()
+    max_posts = config.get("alternate_feed_max_posts", 100)
+    fetch_limit = config.get("fetch_per_channel", 50)
+    media_sem = asyncio.Semaphore(config.get("media_concurrency", 5))
+    posts = await fetch_channel_posts_telethon(
+        tg, channel_ref, limit=fetch_limit, media_sem=media_sem
+    )
+    posts.sort(key=lambda p: p["datetime"], reverse=True)
+    logger.info(
+        "Admin '%s' requested digest channel posts (%d posts)",
+        user["user_name"], len(posts[:max_posts]),
+    )
+    return posts[:max_posts]
+
+
+@app.put("/api/admin/channel-posts/{post_id}")
+async def edit_channel_post(post_id: int, request: Request, user: dict = Depends(require_auth)):
+    """Edit text/caption of a message in DIGEST_TELEGRAM_CHANNEL (admin only)."""
+    if user.get("user_id") != 1:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    channel_ref = _digest_channel_ref()
+    clients = await _digest_write_clients(request)
+    last_err: Exception | None = None
+    for client in clients:
+        try:
+            entity = await client.get_entity(channel_ref)
+            await client.edit_message(entity, post_id, text)
+            logger.info(
+                "User '%s' edited digest channel post %s",
+                user["user_name"], post_id,
+            )
+            return {"status": "success"}
+        except Exception as e:
+            last_err = e
+            logger.warning("Edit digest post %s failed with a client: %s", post_id, e)
+
+    logger.error("Failed to edit digest channel post %s: %s", post_id, last_err)
+    raise HTTPException(status_code=500, detail=f"Failed to edit: {last_err}")
+
+
+@app.delete("/api/admin/channel-posts/{post_id}")
+async def delete_channel_post(post_id: int, request: Request, user: dict = Depends(require_auth)):
+    """Delete a message from DIGEST_TELEGRAM_CHANNEL (admin only)."""
+    if user.get("user_id") != 1:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    channel_ref = _digest_channel_ref()
+    clients = await _digest_write_clients(request)
+    last_err: Exception | None = None
+    for client in clients:
+        try:
+            entity = await client.get_entity(channel_ref)
+            await client.delete_messages(entity, [post_id])
+            logger.info(
+                "User '%s' deleted digest channel post %s",
+                user["user_name"], post_id,
+            )
+            return {"status": "success"}
+        except Exception as e:
+            last_err = e
+            logger.warning("Delete digest post %s failed with a client: %s", post_id, e)
+
+    logger.error("Failed to delete digest channel post %s: %s", post_id, last_err)
+    raise HTTPException(status_code=500, detail=f"Failed to delete: {last_err}")
+
+
 @app.post("/api/top-posts")
 async def get_top_posts(request: Request, user: dict = Depends(require_auth)):
     body = await request.json()

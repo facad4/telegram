@@ -578,6 +578,27 @@
     .post-to-channel-btn:disabled { cursor: default; }
     .post-to-channel-btn svg { width: 16px; height: 16px; flex-shrink: 0; }
 
+    .channel-edit-btn,
+    .channel-delete-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: var(--text-secondary);
+      font-size: 0.85rem;
+      padding: 4px 6px;
+      border-radius: 6px;
+      transition: color 0.15s, background 0.15s;
+    }
+    .channel-edit-btn:hover:not(:disabled) { color: var(--accent); background: var(--border-color); }
+    .channel-delete-btn:hover:not(:disabled) { color: #ef5350; background: var(--border-color); }
+    .channel-edit-btn:disabled,
+    .channel-delete-btn:disabled { cursor: default; opacity: 0.6; }
+    .channel-edit-btn svg,
+    .channel-delete-btn svg { width: 16px; height: 16px; flex-shrink: 0; fill: currentColor; }
+
     .share-popup-overlay {
       position: fixed;
       inset: 0;
@@ -1814,6 +1835,10 @@
         <svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 3c1.93 0 3.5 1.57 3.5 3.5S13.93 13 12 13s-3.5-1.57-3.5-3.5S10.07 6 12 6zm7 13H5v-.23c0-.62.28-1.2.76-1.58C7.47 15.82 9.64 15 12 15s4.53.82 6.24 2.19c.48.38.76.97.76 1.58V19z"/></svg>
         Alternate Feed
       </div>
+      <div class="home-popup-item" id="homePopupChannel">
+        <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
+        Posted to Channel
+      </div>
     </div>
     <div class="control-buttons">
       <button class="control-btn" id="syncBtn" title="Refresh posts manually">
@@ -2013,6 +2038,20 @@
     </div>
   </div>
 
+  <!-- Edit channel post modal -->
+  <div id="editChannelModalOverlay" style="display:none; position:fixed; inset:0; z-index:2000; background:rgba(0,0,0,0.6); align-items:center; justify-content:center;">
+    <div id="editChannelModal" style="background:var(--card-bg); border-radius:12px; padding:24px; width:min(680px,95vw); max-height:90vh; display:flex; flex-direction:column; gap:14px; box-shadow:0 8px 32px rgba(0,0,0,0.4); position:relative;">
+      <button onclick="closeEditChannelPostModal()" style="position:absolute; top:12px; right:14px; background:none; border:none; font-size:1.4rem; cursor:pointer; color:var(--text); opacity:0.6; line-height:1;">✕</button>
+      <h3 style="margin:0; font-size:1.1rem;">Edit Channel Post</h3>
+      <textarea id="editChannelText" rows="10" placeholder="Edit post text…" style="resize:vertical; padding:10px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:0.95rem; font-family:inherit; width:100%; box-sizing:border-box;" dir="auto"></textarea>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <button class="add-btn" id="editChannelSaveBtn" onclick="saveEditedChannelPost()" style="flex:1; min-width:140px;">Save</button>
+        <button class="add-btn" onclick="closeEditChannelPostModal()" style="flex:1; min-width:100px; background:transparent; color:var(--text-secondary); border:1px solid var(--border);">Cancel</button>
+      </div>
+      <div id="editChannelStatus" style="font-size:0.88rem; min-height:1.2em; color:var(--text-secondary);"></div>
+    </div>
+  </div>
+
   <div class="autocomplete-backdrop" id="autocompleteBackdrop"></div>
   <div class="autocomplete-popup" id="autocompletePopup">
     <div class="autocomplete-popup-header">
@@ -2092,7 +2131,7 @@
     let scrollSpeed = 50;
     let scrollAnimId = null;
     let paused = false;
-    let currentView = 'main'; // 'main', 'alternate', 'saved', 'top10', or 'management'
+    let currentView = 'main'; // 'main', 'alternate', 'channel', 'saved', 'top10', or 'management'
     let mainFeedPostsCache = [];
     let top10Cache = [];
     let feedRefreshedSinceTop10 = true;
@@ -2178,6 +2217,33 @@
         if (!isInitialLoad) {
           document.getElementById('postsContainer').innerHTML =
             '<div class="error-msg">Failed to load alternate feed. Will retry on next refresh.</div>';
+        }
+      }
+    }
+
+    async function fetchChannelPosts() {
+      const dot = document.getElementById('statusDot');
+      const text = document.getElementById('statusText');
+      const isInitialLoad = allPosts.length === 0;
+      dot.classList.add('loading');
+      text.textContent = isInitialLoad ? 'Loading posted channel...' : 'Refreshing posted channel...';
+
+      try {
+        const resp = await authFetch('/api/channel-posts');
+        if (!resp.ok) throw new Error('Failed');
+        allPosts = await resp.json();
+        renderFilters();
+        renderPosts();
+        const now = new Date();
+        text.textContent = `Posted to Channel ${now.toLocaleTimeString()}`;
+        dot.classList.remove('loading');
+      } catch (e) {
+        dot.classList.remove('loading');
+        dot.style.background = '#ef5350';
+        text.textContent = 'Error';
+        if (!isInitialLoad) {
+          document.getElementById('postsContainer').innerHTML =
+            '<div class="error-msg">Failed to load posted channel. Will retry on next refresh.</div>';
         }
       }
     }
@@ -2286,7 +2352,8 @@
     function applyAutoHideHeader() {
       const header = document.querySelector('.header');
       const vp = document.getElementById('scrollViewport');
-      if (autoHideHeader && isMobileWidth()) {
+      if (autoHideHeader && isMobileWidth() && currentView !== 'management') {
+        header.classList.remove('header-hidden');
         header.classList.add('auto-hide');
         vp.style.paddingTop = '44px';
         vp.style.transition = 'padding-top 0.3s ease';
@@ -2298,7 +2365,7 @@
     }
 
     function hideHeader() {
-      if (!autoHideHeader || !isMobileWidth()) return;
+      if (!autoHideHeader || !isMobileWidth() || currentView === 'management') return;
       document.querySelector('.header').classList.add('header-hidden');
       document.getElementById('scrollViewport').style.paddingTop = '0';
     }
@@ -3002,9 +3069,17 @@
                   <svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7a2.52 2.52 0 0 0 0-1.39l7-4.11A2.99 2.99 0 1 0 15 5a2.98 2.98 0 0 0 .05.54l-7.1 4.17a3 3 0 1 0 0 4.58l7.09 4.17c-.03.17-.04.35-.04.54a3 3 0 1 0 3-2.92z"/></svg>
                   <span class="share-btn-label">Share</span>
                 </button>
-                ${isAdmin ? `<button class="post-to-channel-btn" data-channel="${post.channel}" data-postid="${post.post_id}" onclick="event.stopPropagation(); handlePostToChannel(this)" title="Post to Telegram channel">
+                ${isAdmin && currentView !== 'channel' ? `<button class="post-to-channel-btn" data-channel="${post.channel}" data-postid="${post.post_id}" onclick="event.stopPropagation(); handlePostToChannel(this)" title="Post to Telegram channel">
                   <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.2-.08-.06-.19-.04-.27-.02-.12.03-1.99 1.27-5.62 3.72-.53.36-1.01.54-1.44.53-.47-.01-1.38-.27-2.06-.49-.83-.27-1.49-.42-1.43-.88.03-.24.37-.49 1.02-.74 3.99-1.74 6.65-2.89 7.99-3.45 3.8-1.58 4.59-1.86 5.1-1.87.11 0 .37.03.54.17.14.12.18.28.2.45-.01.06.01.24 0 .38z"/></svg>
                   <span class="post-to-channel-label">Send</span>
+                </button>` : ''}
+                ${isAdmin && currentView === 'channel' ? `<button class="channel-edit-btn" data-postid="${post.post_id}" onclick="event.stopPropagation(); openEditChannelPostModal('${post.post_id}')" title="Edit post text">
+                  <svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+                  <span>Edit</span>
+                </button>
+                <button class="channel-delete-btn" data-postid="${post.post_id}" onclick="event.stopPropagation(); deleteChannelPost('${post.post_id}', this)" title="Delete post from channel">
+                  <svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                  <span>Delete</span>
                 </button>` : ''}
                 <button class="context-btn" data-post-text="${post.text_plain.replace(/"/g, '&quot;')}" data-post-url="${post.post_url}" data-channel="${post.channel}" data-postid="${post.post_id}" onclick="event.stopPropagation(); event.preventDefault(); toggleContextSummary(this)" title="Get context from web">
                   <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
@@ -3026,6 +3101,7 @@
     // Navigation functions
     function showView(view) {
       currentView = view;
+      applyAutoHideHeader();
       
       // Clear active states on nav links
       document.querySelectorAll('.nav-link').forEach(link => link.classList.remove('active'));
@@ -3079,12 +3155,24 @@
         document.getElementById('stopScrollBtn').style.display = '';
         document.querySelector('.filter-wrapper').style.display = '';
         fetchAlternatePosts();
+      } else if (view === 'channel') {
+        document.getElementById('mainFeedLink').classList.add('active');
+        document.getElementById('scrollViewport').style.display = '';
+        document.getElementById('managementContainer').style.display = 'none';
+        document.getElementById('managementContainer').style.marginTop = '';
+        controlButtons.style.display = '';
+        filterBar.style.display = '';
+        document.getElementById('syncBtn').style.display = '';
+        document.getElementById('orderBtn').style.display = '';
+        document.getElementById('stopScrollBtn').style.display = '';
+        document.querySelector('.filter-wrapper').style.display = '';
+        fetchChannelPosts();
       } else if (view === 'management') {
         showHeader();
         document.getElementById('scrollViewport').style.display = 'none';
         const mgmt = document.getElementById('managementContainer');
         mgmt.style.display = 'block';
-        mgmt.style.marginTop = (autoHideHeader && isMobileWidth()) ? '44px' : '';
+        mgmt.style.marginTop = '';
         controlButtons.style.display = '';
         filterBar.style.display = 'none';
         document.getElementById('syncBtn').style.display = 'none';
@@ -3945,6 +4033,89 @@
       document.getElementById('composeModalOverlay').style.display = 'none';
     }
 
+    let editingChannelPostId = null;
+
+    function openEditChannelPostModal(postId) {
+      const post = allPosts.find(p => String(p.post_id) === String(postId));
+      if (!post) return;
+      editingChannelPostId = postId;
+      const overlay = document.getElementById('editChannelModalOverlay');
+      overlay.style.display = 'flex';
+      document.getElementById('editChannelText').value = post.text_plain || '';
+      document.getElementById('editChannelStatus').textContent = '';
+      document.getElementById('editChannelSaveBtn').disabled = false;
+      setTimeout(() => document.getElementById('editChannelText').focus(), 50);
+    }
+
+    function closeEditChannelPostModal() {
+      document.getElementById('editChannelModalOverlay').style.display = 'none';
+      editingChannelPostId = null;
+    }
+
+    async function saveEditedChannelPost() {
+      if (!editingChannelPostId) return;
+      const text = document.getElementById('editChannelText').value.trim();
+      const status = document.getElementById('editChannelStatus');
+      const saveBtn = document.getElementById('editChannelSaveBtn');
+      if (!text) {
+        status.style.color = '#ef5350';
+        status.textContent = 'Text cannot be empty.';
+        return;
+      }
+      saveBtn.disabled = true;
+      status.style.color = 'var(--text-secondary)';
+      status.textContent = 'Saving…';
+      try {
+        const res = await authFetch(`/api/admin/channel-posts/${editingChannelPostId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+        if (res.ok) {
+          const post = allPosts.find(p => String(p.post_id) === String(editingChannelPostId));
+          if (post) {
+            post.text_plain = text;
+            post.text_html = `<div>${text.replace(/\n/g, '<br>')}</div>`;
+          }
+          status.style.color = '#4caf50';
+          status.textContent = '✓ Saved!';
+          setTimeout(() => {
+            closeEditChannelPostModal();
+            renderPosts();
+          }, 800);
+        } else {
+          const err = await res.json().catch(() => ({}));
+          status.style.color = '#ef5350';
+          status.textContent = err.detail || 'Failed to save.';
+          saveBtn.disabled = false;
+        }
+      } catch (e) {
+        status.style.color = '#ef5350';
+        status.textContent = 'Network error.';
+        saveBtn.disabled = false;
+      }
+    }
+
+    async function deleteChannelPost(postId, btn) {
+      if (!confirm('Delete this post from the Telegram channel? This cannot be undone.')) return;
+      if (btn) btn.disabled = true;
+      try {
+        const res = await authFetch(`/api/admin/channel-posts/${postId}`, { method: 'DELETE' });
+        if (res.ok) {
+          allPosts = allPosts.filter(p => String(p.post_id) !== String(postId));
+          renderFilters();
+          renderPosts();
+        } else {
+          const err = await res.json().catch(() => ({}));
+          alert(err.detail || 'Failed to delete post.');
+          if (btn) btn.disabled = false;
+        }
+      } catch (e) {
+        alert('Network error.');
+        if (btn) btn.disabled = false;
+      }
+    }
+
     async function sendComposedPost(target) {
       const text = document.getElementById('composeText').value.trim();
       const status = document.getElementById('composeStatus');
@@ -4092,6 +4263,8 @@
           await fetchPosts();
         } else if (currentView === 'alternate') {
           await fetchAlternatePosts();
+        } else if (currentView === 'channel') {
+          await fetchChannelPosts();
         } else if (currentView === 'saved') {
           await fetchSavedPosts();
         } else if (currentView === 'top10') {
@@ -4256,6 +4429,11 @@
         return;
       }
       const popup = document.getElementById('homePopup');
+      if (currentView !== 'main') {
+        popup.classList.remove('visible');
+        showView('main');
+        return;
+      }
       if (popup.classList.contains('visible')) {
         popup.classList.remove('visible');
         return;
@@ -4269,6 +4447,10 @@
     document.getElementById('homePopupAlternate').addEventListener('click', () => {
       document.getElementById('homePopup').classList.remove('visible');
       showView('alternate');
+    });
+    document.getElementById('homePopupChannel').addEventListener('click', () => {
+      document.getElementById('homePopup').classList.remove('visible');
+      showView('channel');
     });
     document.addEventListener('click', (e) => {
       const popup = document.getElementById('homePopup');

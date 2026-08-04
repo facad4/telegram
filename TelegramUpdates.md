@@ -102,7 +102,7 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 
 ### 2. Data Fetching
 
-> **Fetching strategy**: When a Telegram (Telethon) client is available, **both public and private channels are fetched via the Telethon API** (`fetch_channel_posts_telethon()`) — public channels are resolved by username, private channels by `PeerChannel(numeric_id)`. HTTP scraping of `t.me/s/<channel>` is used only as a **fallback** when no Telegram client is configured. This applies to both `GET /api/posts` and `GET /api/alternate-posts`.
+> **Fetching strategy**: When a Telegram (Telethon) client is available, **both public and private channels are fetched via the Telethon API** (`fetch_channel_posts_telethon()`) — public channels are resolved by username, private channels by `PeerChannel(numeric_id)`. HTTP scraping of `t.me/s/<channel>` is used only as a **fallback** when no Telegram client is configured. This applies to `GET /api/posts`, `GET /api/alternate-posts`, and `GET /api/channel-posts` (the latter always uses Telethon against `DIGEST_TELEGRAM_CHANNEL`).
 
 #### Public Channel Scraping (`server.py`) — fallback path
 - **Method**: HTTP requests to `https://t.me/s/<channel>` (public web preview) via httpx
@@ -436,6 +436,64 @@ Returns the latest posts from all alternate-feed channels (feeds where `is_alter
 **Error responses**:
 - 403: `{ "detail": "Admin access required" }` (non-admin user)
 
+#### `GET /api/channel-posts` (protected, admin-only)
+Returns the latest posts from the production digest channel (`DIGEST_TELEGRAM_CHANNEL`), sorted by datetime (newest first), limited to `alternate_feed_max_posts` from `config.json`.
+
+**Implementation**:
+- Admin-only (`user_id == 1`); returns 403 for non-admin users
+- Resolves `DIGEST_TELEGRAM_CHANNEL` from the environment (`@username` or numeric ID)
+- Fetches via Telethon user client (`app.state.telegram`) using `fetch_channel_posts_telethon()`
+- Returns sorted posts capped at `alternate_feed_max_posts`
+
+**Response format**: Same JSON array of post objects as `GET /api/posts`.
+
+**Error responses**:
+- 403: `{ "detail": "Admin access required" }` (non-admin user)
+- 503: `{ "detail": "DIGEST_TELEGRAM_CHANNEL not configured" }`
+- 503: `{ "detail": "Telegram client not available" }`
+
+#### `PUT /api/admin/channel-posts/{post_id}` (protected, admin-only)
+Edits the text/caption of a live message in `DIGEST_TELEGRAM_CHANNEL`. Media and existing inline buttons are left unchanged.
+
+**Request body**:
+```json
+{ "text": "Updated caption or message text" }
+```
+
+**Implementation**:
+- Admin-only (`user_id == 1`)
+- Prefers the bot client (`app.state.bot`), falls back to the user client — bot-posted messages with the Perplexity button typically require the bot to edit
+- Calls Telethon `edit_message(entity, post_id, text)` without clearing buttons
+
+**Success response** (200):
+```json
+{ "status": "success" }
+```
+
+**Error responses**:
+- 400: `{ "detail": "text is required" }`
+- 403: Non-admin user
+- 503: Channel or Telegram client not configured
+- 500: Telegram edit failure after trying available clients
+
+#### `DELETE /api/admin/channel-posts/{post_id}` (protected, admin-only)
+Deletes a live message from `DIGEST_TELEGRAM_CHANNEL`.
+
+**Implementation**:
+- Admin-only (`user_id == 1`)
+- Prefers bot client, falls back to user client
+- Calls Telethon `delete_messages(entity, [post_id])`
+
+**Success response** (200):
+```json
+{ "status": "success" }
+```
+
+**Error responses**:
+- 403: Non-admin user
+- 503: Channel or Telegram client not configured
+- 500: Telegram delete failure after trying available clients
+
 #### `GET /api/feeds` (protected)
 Returns the logged-in user's feeds from Supabase as objects with metadata.
 
@@ -602,17 +660,19 @@ Serves the main application (`static/index.html`) with `Cache-Control: no-cache,
 - **Border radius**: 14px consistent rounded corners
 
 #### Navigation System
-- **Multi-View Interface**: Five distinct views accessible via header navigation
+- **Multi-View Interface**: Six distinct views accessible via header navigation
   - **Main Feed**: Primary channel content (default view, "Home" link on left)
   - **Alternate Feed**: Admin-curated secondary feed (accessible via Home button popup, admin only)
+  - **Posted to Channel**: Live posts from `DIGEST_TELEGRAM_CHANNEL` with edit/delete (Home button popup, admin only)
   - **Saved Posts**: Bookmarked posts (bookmark icon in control buttons)
   - **Top 10**: AI-ranked most important posts (❗ icon in control buttons)
   - **Management Interface**: Feed and admin controls (⚙️ icon on top-right)
-- **Home Button Popup** (admin only): Clicking the Home button shows a popup menu with "Main Feed" and "Alternate Feed" options; non-admin users go directly to the main feed. Clicking outside the popup dismisses it.
+- **Home Button Behavior**: From any non-main view, clicking Home returns directly to Main Feed. When already on Main Feed, admin users see the "Main Feed", "Alternate Feed", and "Posted to Channel" popup; non-admin users remain on Main Feed. Clicking outside dismisses the popup.
 - **Navigation Layout**: Streamlined header without logo
   - **Left side**: Home navigation link + control buttons
   - **Right side**: Filter bar, status, settings icon, logout button
 - **Context-Aware UI**: Different controls shown based on current view; management view hides feed-specific controls (sync, sort, stop/resume, filter) on mobile
+- **Settings Navigation**: The top bar remains visible in the management view so the Home control is always available
 
 #### Layout Structure
 - **Login Overlay**: Full-screen centered login form (hidden when authenticated)
@@ -649,6 +709,7 @@ Serves the main application (`static/index.html`) with `Cache-Control: no-cache,
 - Header automatically slides out of view when scrolling down on mobile and reappears when scrolling up
 - Implemented via `applyAutoHideHeader()` / `hideHeader()` / `showHeader()`
 - Toggled with `toggleAutoHideHeader(enabled)` — can be enabled/disabled programmatically
+- Disabled while the management view is open, keeping the top bar and Home control visible; the stored preference resumes in feed views
 - Maximizes visible feed area on small screens without losing navigation access
 
 #### Auto-scrolling Implementation
@@ -677,7 +738,8 @@ Serves the main application (`static/index.html`) with `Cache-Control: no-cache,
 - **Channel links**: Click to open channel page (event propagation stopped)
 - **Link previews**: Click to open external links
 - **Share button**: Share post via native share sheet or custom popup (see Share System below)
-- **Send button** (admin only): Forwards post to configured Telegram digest channel via `POST /api/admin/share-to-channel`; hidden for non-admin users
+- **Send button** (admin only): Forwards post to configured Telegram digest channel via `POST /api/admin/share-to-channel`; hidden for non-admin users and hidden in the Posted to Channel view
+- **Edit / Delete buttons** (admin only, Posted to Channel view): Edit opens a modal to change text/caption via `PUT /api/admin/channel-posts/{post_id}`; Delete confirms then removes the live Telegram message via `DELETE /api/admin/channel-posts/{post_id}`
 - **Save button**: Bookmark/unbookmark posts for later
 - **Filter buttons**: Toggle between "All" and individual channels
 - **Control buttons**: Manual sync, sort order toggle, and stop/resume scrolling
@@ -766,12 +828,23 @@ Each post tile has a Share button in the footer (between views count and save bu
 #### Alternate Feed (Admin Only)
 - **Purpose**: A separate curated feed of Telegram channels managed by the admin, independent of the main feed
 - **Access**: Admin users access the alternate feed via a popup menu on the Home button; non-admin users see only the main feed
-- **Home Button Popup**: Clicking Home shows a fixed popup with "Main Feed" and "Alternate Feed" options; clicking outside or selecting an option closes it; event listeners are registered once at the top-level script scope to avoid duplication
+- **Home Button Navigation**: Clicking Home from Alternate Feed returns directly to Main Feed. Clicking Home again while on Main Feed shows the fixed popup with "Main Feed", "Alternate Feed", and "Posted to Channel"; clicking outside or selecting an option closes it
 - **Alternate View**: Dedicated `showView('alternate')` branch fetches posts from `GET /api/alternate-posts` and renders them in the standard feed layout
 - **Management**: A dedicated "Alternate Feed Channels" section in the admin settings allows adding/removing channels with the same autocomplete experience as the main feed
 - **Post Limit**: Controlled by the `alternate_feed_max_posts` setting in `config.json` (separate from the main feed's `max_posts`)
 - **Feed Isolation**: Main feed (`GET /api/posts`) filters out `is_alternate=true` feeds; alternate feed (`GET /api/alternate-posts`) only returns `is_alternate=true` feeds
 - **Standalone Digest Script**: `generate_alternate_digest.py` fetches alternate feed posts, processes them through Mistral AI for deduplication/ranking/rephrasing, maintains persistent history in `digest_history.json` (with incremental updates and raw post tracking to avoid reprocessing), and generates a local HTML digest file showing the full archive (see Standalone Scripts section)
+
+#### Posted to Channel Feed (Admin Only)
+- **Purpose**: Browse and manage live messages already posted to the production digest channel (`DIGEST_TELEGRAM_CHANNEL`)
+- **Access**: Admin Home popup item "Posted to Channel" → `showView('channel')`; non-admin users do not see this option
+- **Return to Main**: Clicking the Home icon from this view closes any popup and immediately calls `showView('main')`
+- **Data source**: `GET /api/channel-posts` fetches via Telethon from `DIGEST_TELEGRAM_CHANNEL` (not from Supabase feeds)
+- **Rendering**: Same feed card layout as main/alternate; Send button is hidden; Edit and Delete buttons are shown instead
+- **Edit**: Modal prefilled with `text_plain`; Save calls `PUT /api/admin/channel-posts/{post_id}` with `{ "text": "..." }` (text/caption only; media and inline buttons unchanged); on success updates `allPosts` and re-renders
+- **Delete**: Confirms, then `DELETE /api/admin/channel-posts/{post_id}`; on success removes the post from `allPosts` and re-renders
+- **Manual Sync**: Refresh button refetches channel posts when `currentView === 'channel'`
+- **Album caveat**: Edit/delete operate on the single `post_id` returned by the merged Telethon post (caption-bearing message)
 
 #### Content Processing
 - **HTML sanitization**: `sanitizeHtml()` function removes `onclick`, adds security attributes
@@ -794,6 +867,7 @@ Each post tile has a Share button in the footer (between views count and save bu
 - **View Switching**: `showView(view)` function manages interface state; resets inline display styles to avoid overriding CSS defaults (e.g. `display: contents` on mobile)
   - **Main View**: Fetches from `/api/posts` (user's main-feed channels from Supabase -- both public and private, excluding alternate feeds); restores all control buttons and filter
   - **Alternate View**: Fetches from `/api/alternate-posts` (admin only); displays posts from the alternate feed channels
+  - **Channel View**: Fetches from `/api/channel-posts` (admin only); displays live posts from `DIGEST_TELEGRAM_CHANNEL` with Edit/Delete actions
   - **Saved View**: Fetches from `/api/saved` (bookmarked posts); restores all control buttons and filter
   - **Management View**: Loads feed management interface (and admin settings + private channels + alternate feed management if admin); hides sync, sort, stop/resume buttons and filter wrapper
 - **Auto-Refresh**: Periodic refresh of main feed only
@@ -1044,6 +1118,9 @@ Comprehensive server-side logging of user actions for analytics and monitoring:
   - Tracks share method: `native` (browser share), `whatsapp`, `telegram`, `email`, `copy`
   - Frontend calls `POST /api/track/share` endpoint with share method and post URL
   - Tracking is fire-and-forget (silent failures) to avoid disrupting user experience
+- **Digest Channel Posts**: `Admin 'username' requested digest channel posts (N posts)`
+- **Edit Digest Post**: `User 'username' edited digest channel post {post_id}`
+- **Delete Digest Post**: `User 'username' deleted digest channel post {post_id}`
 
 #### Log Configuration
 - **Output**: stderr (default Python logging)
@@ -1245,6 +1322,7 @@ Windows-only enrichment backend that drives a real **Brave** browser via OS auto
 13. **Media cache persistence**: Avatar and thumbnail caches are stored on disk (`avatar_cache/`, `thumb_cache/`) with a 2-week TTL, while video bytes and CDN URLs are cached only in process memory (lost on restart)
 14. **Telegram session sharing**: Using the same Telegram session from multiple IPs simultaneously can cause revocation; separate dev/prod sessions recommended
 15. **Share API availability**: Some mobile browsers (e.g., Brave with Shields) strip `navigator.share`; custom share popup used as fallback
+16. **Digest channel album edit/delete**: Edit and delete operate on the single merged `post_id` (caption-bearing message); other messages in a media album are not edited or deleted as a group
 
 ## Implementation Details
 
@@ -1256,6 +1334,11 @@ Windows-only enrichment backend that drives a real **Brave** browser via OS auto
 - `login(request)`: `POST /api/login` handler -- authenticates credentials, returns JWT token with `user_id`, and `is_admin` flag
 - `get_posts(request, user)`: `GET /api/posts` -- fetches user's feeds from Supabase, filters out alternate feeds, splits into public/private, scrapes public channels and fetches private channels via Telethon, returns merged sorted posts
 - `get_alternate_posts(request, user)`: `GET /api/alternate-posts` -- admin-only; fetches all alternate-feed channels, returns posts limited to `alternate_feed_max_posts`
+- `_digest_channel_ref() -> int | str`: Resolves `DIGEST_TELEGRAM_CHANNEL` from the environment (numeric ID or username); raises 503 if unset
+- `_digest_write_clients(request) -> list[TelegramClient]`: Returns bot-then-user clients for digest channel edit/delete
+- `get_channel_posts(request, user)`: `GET /api/channel-posts` -- admin-only; fetches live posts from `DIGEST_TELEGRAM_CHANNEL` via Telethon, capped at `alternate_feed_max_posts`
+- `edit_channel_post(post_id, request, user)`: `PUT /api/admin/channel-posts/{post_id}` -- admin-only; edits text/caption of a digest channel message (bot preferred, user fallback)
+- `delete_channel_post(post_id, request, user)`: `DELETE /api/admin/channel-posts/{post_id}` -- admin-only; deletes a digest channel message (bot preferred, user fallback)
 - `get_feeds(request, user)`: `GET /api/feeds` -- returns user's feeds as objects with `feed_url`, `is_private`, `admin_only`, `is_alternate`
 - `add_feed(request, user)`: `POST /api/feeds` -- adds a feed with duplicate check on `(user_id, feed_url, is_alternate)`, admin-only restriction enforcement, and `is_private`/`admin_only`/`is_alternate` support (409 on conflict, 403 on admin-only or alternate violation); logs channel addition with username and channel details
 - `delete_feed(request, user)`: `DELETE /api/feeds` -- removes a feed for the user scoped by `is_alternate`; logs channel removal with username and channel name
@@ -1320,10 +1403,10 @@ Windows-only enrichment backend that drives a real **Brave** browser via OS auto
 - `showApp()` / `showLogin()`: Toggle visibility between login overlay and app container
 - `fetchConfig()`: Loads client settings from `/api/config`
 - `fetchPosts()`: Main feed data fetching with loading states
-- `showView(view)`: Multi-view navigation and state management (`main`, `alternate`, `saved`, `management`); resets inline display styles to preserve CSS defaults; hides feed-specific controls in management view
+- `showView(view)`: Multi-view navigation and state management (`main`, `alternate`, `channel`, `saved`, `top10`, `management`); resets inline display styles to preserve CSS defaults; hides feed-specific controls in management view
 - `startScrolling()`: Auto-scroll animation engine
 - `renderFilters()`: Dynamic, scrollable filter button generation
-- `renderPosts()`: Responsive post HTML generation with mobile support
+- `renderPosts()`: Responsive post HTML generation with mobile support; in channel view shows Edit/Delete and hides Send
 - `handleShareClick(evt, postUrl, btn)`: Click handler for share button with propagation control
 - `sharePost(postUrl, btn)`: Tries `navigator.share` first, falls back to custom share popup; tracks share via `trackShare()`
 - `trackShare(sharedTo, postUrl)`: Calls `POST /api/track/share` to log share actions (fire-and-forget)
@@ -1337,6 +1420,9 @@ Windows-only enrichment backend that drives a real **Brave** browser via OS auto
 - `toggleAutoHideHeader(enabled)`: Enables or disables auto-hide header behavior
 - `openComposeModal()` / `closeComposeModal()`: Opens/closes the admin "Post to Channel" text composer modal
 - `sendComposedPost(target)`: Submits the composed text via `POST /api/admin/compose-to-channel` for the given target (`test`/`production`); disables buttons during send, shows success/error feedback
+- `openEditChannelPostModal(postId)` / `closeEditChannelPostModal()`: Opens/closes the edit modal for a digest channel post, prefilled with `text_plain`
+- `saveEditedChannelPost()`: Saves edited text via `PUT /api/admin/channel-posts/{post_id}`; updates `allPosts` and re-renders on success
+- `deleteChannelPost(postId, btn)`: Confirms then deletes via `DELETE /api/admin/channel-posts/{post_id}`; removes from `allPosts` and re-renders on success
 - `openImageUploadModal()` / `closeImageUploadModal()`: Opens/closes the image upload modal in the admin management panel
 - `sendImageToChannel(target)`: Reads the selected file and caption, submits a multipart `POST /api/admin/upload-image-to-channel` request; disables buttons during upload, shows success/error feedback
 - `loadManagementInterface()`: Loads feed list, private channels section (admin), alternate feed management (admin), and settings (admin)
@@ -1352,6 +1438,7 @@ Windows-only enrichment backend that drives a real **Brave** browser via OS auto
 - `showFloatingBubble(message)`: Creates a temporary floating bubble notification that fades in, displays for 3 seconds, and auto-removes from the DOM
 - `updateAiModelOptions(provider)`: Populates the AI Model dropdown with models appropriate for the selected provider (Gemini or Groq)
 - `fetchAlternatePosts()`: Fetches and renders posts from `GET /api/alternate-posts` (admin only)
+- `fetchChannelPosts()`: Fetches and renders posts from `GET /api/channel-posts` (admin only)
 - `loadAlternateFeedList()`: Fetches and displays only `is_alternate=true` feeds in the alternate feed management section
 - `setupAltAutocomplete()`: Initializes channel search autocomplete for the alternate feed input
 - `openAltAddChannelPopup()` / `closeAltAddChannelPopup()`: Opens/closes the autocomplete popup for adding alternate feed channels
@@ -1359,7 +1446,7 @@ Windows-only enrichment backend that drives a real **Brave** browser via OS auto
 - `addAltChannelFromPopup(index)` / `addAltFeedByUrl(url)`: Adds a channel to the alternate feed via `POST /api/feeds` with `is_alternate: true`
 - `removeFeed(feedUrl, isAlternate=false)`: Removes a feed via `DELETE /api/feeds` with `is_alternate` flag
 - `saveAdminSettings()`: Saves global settings via `POST /api/admin/config` (admin only)
-- `manualSync()`: Manual post refresh with loading states
+- `manualSync()`: Manual post refresh with loading states (main, alternate, channel, saved, top10)
 - `toggleSortOrder()`: Client-side post sorting toggle
 - `toggleStopScrolling()`: Stop/resume auto-scrolling control
 - `setTheme(theme)`: Applies light/dark theme via `data-theme` attribute, updates meta tags, saves to `localStorage`, and highlights the active button in the management panel
