@@ -35,6 +35,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from telethon import TelegramClient, Button
 from telethon.sessions import StringSession
+from perplexity_marker import PX_BUTTON_LABEL
 
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -51,10 +52,13 @@ class AIProvider:
     """Base class for OpenAI-compatible chat-completion providers returning JSON."""
     BASE_URL = ""
     SUPPORTS_JSON_RESPONSE_FORMAT = True
+    # Max output tokens to request. None => don't send the field (use provider default).
+    DEFAULT_MAX_TOKENS: int | None = None
 
-    def __init__(self, api_key: str, model: str):
+    def __init__(self, api_key: str, model: str, max_tokens: int | None = None):
         self.api_key = api_key
         self.model = model
+        self.max_tokens = max_tokens if max_tokens is not None else self.DEFAULT_MAX_TOKENS
 
     def chat_json(self, system_prompt: str, user_content: str,
                   temperature: float = 0.2, timeout: float = 300.0) -> str:
@@ -72,6 +76,8 @@ class AIProvider:
         }
         if self.SUPPORTS_JSON_RESPONSE_FORMAT:
             body["response_format"] = {"type": "json_object"}
+        if self.max_tokens:
+            body["max_tokens"] = self.max_tokens
 
         timeout_obj = httpx.Timeout(timeout, connect=30.0, read=timeout, write=60.0, pool=30.0)
         transient_status = {500, 502, 503, 504}
@@ -102,11 +108,14 @@ class AIProvider:
                         err_body = resp.read().decode(errors="replace")
                         _log_err(f"{provider_name} API error (HTTP {resp.status_code}): {err_body[:500]}")
                         sys.exit(1)
+                    finish_reason = None
+                    got_done = False
                     for line in resp.iter_lines():
                         if not line or not line.startswith("data:"):
                             continue
                         payload = line[5:].strip()
                         if payload == "[DONE]":
+                            got_done = True
                             break
                         try:
                             event = json.loads(payload)
@@ -115,11 +124,27 @@ class AIProvider:
                         choices = event.get("choices") or []
                         if not choices:
                             continue
-                        delta = choices[0].get("delta") or {}
+                        choice = choices[0]
+                        if choice.get("finish_reason"):
+                            finish_reason = choice["finish_reason"]
+                        delta = choice.get("delta") or {}
                         piece = delta.get("content")
                         if piece:
                             chunks.append(piece)
-                return "".join(chunks).strip()
+                content = "".join(chunks).strip()
+                # A truncated response (hit the token cap) or a stream that ended
+                # without a proper completion signal yields incomplete JSON. Treat
+                # both as transient so the retry loop below re-requests instead of
+                # handing garbage to json.loads().
+                if finish_reason == "length":
+                    raise httpx.RemoteProtocolError(
+                        f"output truncated by max_tokens (finish_reason=length, {len(content)} chars)"
+                    )
+                if not got_done and finish_reason is None:
+                    raise httpx.RemoteProtocolError(
+                        f"stream ended prematurely without completion (got {len(content)} chars)"
+                    )
+                return content
             except transient_excs as e:
                 last_error = last_error or f"{type(e).__name__}: {e}"
                 if attempt >= len(backoff):
@@ -138,28 +163,68 @@ class MistralProvider(AIProvider):
 
 class NIMProvider(AIProvider):
     BASE_URL = "https://integrate.api.nvidia.com/v1"
-    SUPPORTS_JSON_RESPONSE_FORMAT = False
+    # GLM on NIM honors OpenAI-style JSON mode; enforce valid JSON output.
+    SUPPORTS_JSON_RESPONSE_FORMAT = True
+    # GLM-5.x has "thinking" enabled by default, so reasoning + output can exceed
+    # NIM's implicit output cap and get truncated. Request a generous budget.
+    DEFAULT_MAX_TOKENS = 32768
+
+
+def _next_nim_api_key() -> tuple[str, str]:
+    """Return (api_key, env_name), rotating across configured NIM keys per run."""
+    keys = [(n, os.environ.get(n, "").strip()) for n in NIM_KEY_ENV_NAMES]
+    keys = [(n, v) for n, v in keys if v]
+    if not keys:
+        return "", NIM_KEY_ENV_NAMES[0]
+    if len(keys) == 1:
+        log(f"[NIM] Only one key set ({keys[0][0]}); rotation disabled.")
+        return keys[0][1], keys[0][0]
+    try:
+        last = int(json.loads(NIM_KEY_STATE_PATH.read_text()).get("last_index", -1))
+    except (FileNotFoundError, json.JSONDecodeError, ValueError, TypeError):
+        last = -1
+    idx = (last + 1) % len(keys)
+    try:
+        NIM_KEY_STATE_PATH.write_text(json.dumps({"last_index": idx}))
+    except OSError as e:
+        log(f"[NIM] Could not persist key rotation state: {e}", error=True)
+    name, value = keys[idx]
+    log(f"[NIM] Using API key: {name} (rotation index {idx}/{len(keys)})")
+    return value, name
 
 
 def build_provider(config: dict) -> AIProvider:
     name = (config.get("channel_ai_provider") or "mistral").lower()
     model = config.get("channel_ai_model")
+    max_tokens = config.get("channel_max_tokens")
+    max_tokens = int(max_tokens) if max_tokens else None
     if name == "nim":
-        return NIMProvider(os.environ.get("NVIDIA_API_KEY", ""), model or "z-ai/glm-5.1")
+        api_key, _ = _next_nim_api_key()
+        return NIMProvider(api_key, model or "z-ai/glm-5.1", max_tokens=max_tokens)
     if name == "mistral":
-        return MistralProvider(os.environ.get("MISTRAL_API_KEY", ""), model or "mistral-large-latest")
+        return MistralProvider(os.environ.get("MISTRAL_API_KEY", ""),
+                               model or "mistral-large-latest", max_tokens=max_tokens)
     raise ValueError(f"Unknown channel_ai_provider: {name!r}")
 
 
 PROMPT_PATH = Path(__file__).parent / "alternate_feed_prompt.md"
 CONFIG_PATH = Path(__file__).parent / "config.json"
 HISTORY_PATH = Path(__file__).parent / "digest_history.json"
+NIM_KEY_STATE_PATH = Path(__file__).parent / "test_nim_key_state.json"
+NIM_KEY_ENV_NAMES = ["NVIDIA_API_KEY", "NIM_UNIFEED"]
+FIRST_RUN_STORY_COUNT = 10
 
 # --- Script Configuration ---
 POST_TO_CHANNEL = True   # Post stories to the Telegram channel (requires DIGEST_TELEGRAM_CHANNEL env var)
 POST_VIDEOS = True      # Download and post videos from source posts
-
 def wrap_with_divider(text: str) -> str:
+    return text
+
+
+def _md_to_html(text: str) -> str:
+    """Convert **bold** markdown to Telegram HTML."""
+    text = html.escape(text)
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
     return text
 
 
@@ -174,6 +239,13 @@ def load_config() -> dict:
             return json.load(f)
     except FileNotFoundError:
         return {}
+
+
+def _story_counts(configured_max_stories: int, has_history: bool) -> tuple[int, int]:
+    """Return the effective new-story target and model candidate count."""
+    if not has_history:
+        return FIRST_RUN_STORY_COUNT, FIRST_RUN_STORY_COUNT
+    return configured_max_stories, configured_max_stories + 2
 
 
 def load_history() -> tuple[list[dict], set[str], set[str], dict[str, str]]:
@@ -198,6 +270,14 @@ def _story_preview(story: dict, max_len: int = 80) -> str:
     return text[:max_len] + ("..." if len(text) > max_len else "")
 
 
+def _story_importance_rank(story: dict) -> int:
+    """Return a sortable importance rank, placing invalid values last."""
+    try:
+        return int(story.get("importance"))
+    except (TypeError, ValueError):
+        return sys.maxsize
+
+
 def _post_key(post: dict) -> str:
     """Build a unique key for a raw Telegram post."""
     return f"{post.get('channel', '')}_{post.get('post_id', '')}"
@@ -212,31 +292,54 @@ def save_history(
     posted_media_hashes: set[str] | None = None,
     processed_post_texts: dict[str, str] | None = None,
 ) -> None:
-    """Append new stories/updates to history and track processed raw post keys."""
+    """Apply successful story posts/updates and track processed raw post keys."""
     now = datetime.now().isoformat()
     added, updates = 0, 0
 
     for story in new_stories:
         hi = story.get("history_index")
-        story["created_at"] = now
-        story["updated_at"] = now
-
         if hi is not None:
-            real_index = offset + hi
-            if 0 <= real_index < len(full_history):
-                story["parent_index"] = real_index
-                full_history.append(story)
+            if 0 <= hi < len(full_history):
+                existing = full_history[hi]
+                additional_info = story.get("text", "").strip()
+                if not additional_info:
+                    continue
+                existing_text = existing.get("text", "").rstrip()
+                existing["text"] = f"{existing_text}\n\n**עדכון:** {additional_info}"
+                existing["updated_at"] = now
+                update_record = {
+                    "text": additional_info,
+                    "created_at": now,
+                    "telegram_message_id": story.get("telegram_message_id"),
+                    "validation_reason": story.get("validation_reason", ""),
+                }
+                existing.setdefault("updates", []).append(update_record)
+                if story.get("telegram_message_id") is not None:
+                    existing.setdefault("telegram_update_message_ids", []).append(
+                        story["telegram_message_id"]
+                    )
                 updates += 1
-                log(f"  [UPDATE for #{real_index}] {_story_preview(story)}")
+                log(
+                    f"  [HISTORY-UPDATE #{hi}] added={_story_preview(story)} "
+                    f"reply_message_id={story.get('telegram_message_id')}"
+                )
             else:
-                story.pop("history_index", None)
-                full_history.append(story)
-                added += 1
-                log(f"  [NEW] {_story_preview(story)}")
+                log(f"  [HISTORY-SKIP] Invalid matched history index #{hi}.", error=True)
         else:
-            full_history.append(story)
+            stored_story = {
+                key: value
+                for key, value in story.items()
+                if not key.startswith("_")
+                and key not in {"reply_to_message_id", "validation_reason"}
+            }
+            stored_story["created_at"] = now
+            stored_story["updated_at"] = now
+            full_history.append(stored_story)
             added += 1
-            log(f"  [NEW] {_story_preview(story)}")
+            log(
+                f"  [HISTORY-NEW] {_story_preview(story)} "
+                f"telegram_message_id={story.get('telegram_message_id')}"
+            )
 
     if processed_post_texts is None:
         processed_post_texts = {}
@@ -451,88 +554,158 @@ def filter_covered_by_history(
 def call_provider(provider: AIProvider, prompt: str, user_content: str) -> list:
     """Send posts to the AI provider and parse the structured JSON response."""
     name = type(provider).__name__
-    content = provider.chat_json(prompt, user_content, temperature=0.2, timeout=900.0)
-    content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    max_parse_attempts = 3
+    for attempt in range(max_parse_attempts):
+        content = provider.chat_json(prompt, user_content, temperature=0.2, timeout=900.0)
+        content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
 
-    try:
-        result = json.loads(content)
-    except json.JSONDecodeError as e:
-        log(f"Failed to parse {name} response: {e}", error=True)
-        log(f"Raw content: {content[:1000]}", error=True)
-        sys.exit(1)
+        try:
+            result = json.loads(content)
+        except json.JSONDecodeError as e:
+            log(f"Failed to parse {name} response: {e}", error=True)
+            log(f"Raw content: {content[:1000]}", error=True)
+            if attempt < max_parse_attempts - 1:
+                log(f"Retrying {name} request (parse attempt {attempt + 2}/{max_parse_attempts})...", error=True)
+                continue
+            sys.exit(1)
 
-    stories = result.get("stories", result if isinstance(result, list) else [])
-    if not isinstance(stories, list):
-        log(f"{name} returned invalid stories format.", error=True)
-        sys.exit(1)
+        stories = result.get("stories", result if isinstance(result, list) else [])
+        if not isinstance(stories, list):
+            log(f"{name} returned invalid stories format.", error=True)
+            sys.exit(1)
 
-    return stories
+        return stories
 
-
-UPDATE_PROMPT = (
-    "You are given a list of pairs. Each pair has a 'new_story' and an 'existing_story' about the same event. "
-    "For each pair, write a SHORT Hebrew update (1-2 sentences) containing ONLY new facts from 'new_story' "
-    "that are NOT already present in 'existing_story'. "
-    "If there are no genuinely new facts, write an empty string for update_text. "
-    'Return ONLY valid JSON: {"updates": [{"index": <i>, "update_text": "<text>"}]}'
-)
+    return []
 
 
-def check_story_against_history(
+HISTORY_VALIDATION_PROMPT = """
+You validate one newly generated Hebrew news story against stories that were
+previously posted to a Telegram channel.
+
+Compare the candidate semantically against EVERY item in posted_stories. Do not
+compare wording alone; identify whether the same real-world event is already
+covered.
+
+Return exactly one JSON object:
+{
+  "classification": "new" | "update" | "duplicate",
+  "matched_history_index": <integer or null>,
+  "additional_info": "<only genuinely new facts, in concise Hebrew, or empty>",
+  "reason": "<clear concise explanation>"
+}
+
+Rules:
+- "new": no posted story covers the same event. matched_history_index must be null.
+- "update": a posted story covers the event, but the candidate contains material
+  new facts. additional_info must contain only those new facts.
+- "duplicate": the event and all material facts are already covered.
+- Rewording, commentary, emphasis, or a new source without new facts is duplicate.
+- Never invent facts. Use only the candidate and posted_stories.
+"""
+
+
+def _posted_history_for_validation(history: list[dict]) -> list[dict]:
+    """Return generated history stories that were posted (legacy entries are assumed posted)."""
+    return [
+        {
+            "history_index": idx,
+            "text": story.get("text", ""),
+            "telegram_message_id": story.get("telegram_message_id"),
+        }
+        for idx, story in enumerate(history)
+        if story.get("text") and story.get("telegram_posted") is not False
+    ]
+
+
+def validate_story_candidate(
     story: dict,
-    history: list[dict],
-    threshold_duplicate: float = 0.88,
-    threshold_update: float = 0.70,
-) -> tuple[str, int | None]:
-    """Classify a generated story as 'new', 'update', or 'duplicate' vs. history.
-
-    Returns (classification, history_idx_or_None).
-    """
-    text = story.get("text", "")[:400]
-    if not text or len(text) < 30:
-        return "new", None
-
-    best_sim, best_idx = 0.0, None
-    for idx, h in enumerate(history):
-        h_text = h.get("text", "")[:400]
-        if len(h_text) < 30:
-            continue
-        sim = _text_similarity(text, h_text)
-        if sim > best_sim:
-            best_sim, best_idx = sim, idx
-
-    if best_sim >= threshold_duplicate:
-        return "duplicate", best_idx
-    elif best_sim >= threshold_update:
-        return "update", best_idx
-    return "new", None
-
-
-def rewrite_updates_batch(
-    pairs: list[dict],
+    rank: int,
+    posted_history: list[dict],
     provider: AIProvider,
-) -> list[dict]:
-    """Single AI provider call to condense all update stories into 'new facts only' text.
-
-    pairs: [{"index": i, "new_story": "...", "existing_story": "..."}, ...]
-    Returns: [{"index": i, "update_text": "..."}, ...]
-    """
-    if not pairs:
-        return []
+) -> dict:
+    """Validate one candidate with the model against all posted generated stories."""
+    log(f"  [VALIDATE rank={rank}] candidate={_story_preview(story)}")
+    if not posted_history:
+        reason = "No previously posted stories exist in digest history."
+        log(f"  [NEW rank={rank}] {reason}")
+        return {
+            "classification": "new",
+            "matched_history_index": None,
+            "additional_info": "",
+            "reason": reason,
+        }
 
     content = provider.chat_json(
-        UPDATE_PROMPT,
-        json.dumps({"pairs": pairs}, ensure_ascii=False),
-        temperature=0.1,
-        timeout=600.0,
+        HISTORY_VALIDATION_PROMPT,
+        json.dumps(
+            {"candidate": story.get("text", ""), "posted_stories": posted_history},
+            ensure_ascii=False,
+        ),
+        temperature=0.0,
+        timeout=900.0,
     )
     content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
         result = json.loads(content)
-        return result.get("updates", [])
-    except json.JSONDecodeError:
-        log("Failed to parse update-rewrite response; keeping original update texts.", error=True)
-        return []
+    except json.JSONDecodeError as exc:
+        reason = f"Validation response was invalid JSON: {exc}"
+        log(f"  [REJECT rank={rank}] {reason}", error=True)
+        return {
+            "classification": "duplicate",
+            "matched_history_index": None,
+            "additional_info": "",
+            "reason": reason,
+        }
+
+    classification = str(result.get("classification", "")).strip().lower()
+    reason = str(result.get("reason", "")).strip() or "Model supplied no reason."
+    additional_info = str(result.get("additional_info", "")).strip()
+    matched_index = result.get("matched_history_index")
+    try:
+        matched_index = int(matched_index) if matched_index is not None else None
+    except (TypeError, ValueError):
+        matched_index = None
+
+    history_by_index = {item["history_index"]: item for item in posted_history}
+    matched = history_by_index.get(matched_index)
+    if classification not in {"new", "update", "duplicate"}:
+        classification = "duplicate"
+        reason = f"Invalid model classification; candidate rejected. Model reason: {reason}"
+    if classification in {"update", "duplicate"} and matched is None:
+        classification = "duplicate"
+        reason = f"No valid matched history entry was supplied. Model reason: {reason}"
+    if classification == "update" and not additional_info:
+        classification = "duplicate"
+        reason = f"Rejected update because it contains no genuinely new information. {reason}"
+
+    if classification == "new":
+        log(f"  [NEW rank={rank}] reason={reason}")
+    elif classification == "update":
+        log(
+            f"  [UPDATE rank={rank}] reason={reason} matched_history=#{matched_index} "
+            f"telegram_message_id={matched.get('telegram_message_id')} "
+            f"existing={matched.get('text', '')[:160]!r} additional={additional_info[:160]!r}"
+        )
+    else:
+        matched_details = (
+            f" matched_history=#{matched_index} "
+            f"telegram_message_id={matched.get('telegram_message_id')} "
+            f"existing={matched.get('text', '')[:160]!r}"
+            if matched
+            else ""
+        )
+        log(
+            f"  [REJECT-DUPLICATE rank={rank}] reason={reason}{matched_details} "
+            f"candidate={_story_preview(story)!r}"
+        )
+
+    return {
+        "classification": classification,
+        "matched_history_index": matched_index,
+        "additional_info": additional_info,
+        "reason": reason,
+    }
 
 
 def _abs_url(url: str, base_url: str) -> str | None:
@@ -571,17 +744,6 @@ def resolve_media_urls(stories: list[dict], original_posts: list[dict], base_url
         thumb_resolved = []
         seen_fingerprints: set[str] = set()
 
-        # Pre-scan: collect fingerprints of video thumbnails so they are not
-        # mistakenly placed in media_urls (they belong in video_thumb_urls only).
-        video_thumb_fps: set[str] = set()
-        for idx in story.get("source_indices", []):
-            if 0 <= idx < len(original_posts):
-                vt = original_posts[idx].get("video_thumb") or ""
-                if vt:
-                    abs_vt = _abs_url(vt, base_url)
-                    if abs_vt:
-                        video_thumb_fps.add(_media_url_fingerprint(abs_vt))
-
         def _try_add(url: str | None, target: list) -> None:
             if not url:
                 return
@@ -598,9 +760,6 @@ def resolve_media_urls(stories: list[dict], original_posts: list[dict], base_url
             target.append(abs)
 
         for url in story.get("media_urls", []):
-            abs_u = _abs_url(url, base_url)
-            if abs_u and _media_url_fingerprint(abs_u) in video_thumb_fps:
-                continue  # video thumbnail — source_indices loop will add it to thumb_resolved
             _try_add(url, resolved)
         for idx in story.get("source_indices", []):
             if 0 <= idx < len(original_posts):
@@ -696,21 +855,33 @@ async def connect_telegram() -> TelegramClient | None:
 
 
 async def connect_telegram_bot() -> TelegramClient | None:
-    """Create and connect a Telethon client logged in as a bot. None if TELEGRAM_BOT_TOKEN unset."""
+    """Create an in-memory bot client, falling back cleanly if startup fails."""
     api_id = os.environ.get("TELEGRAM_API_ID")
     api_hash = os.environ.get("TELEGRAM_API_HASH")
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not (api_id and api_hash and bot_token):
         return None
-    client = TelegramClient("digest_bot.session", int(api_id), api_hash)
-    await client.start(bot_token=bot_token)
-    return client
+    client = TelegramClient(StringSession(), int(api_id), api_hash)
+    try:
+        await client.start(bot_token=bot_token)
+        return client
+    except Exception as exc:
+        log(
+            f"Bot client startup failed; falling back to user client: {exc}",
+            error=True,
+        )
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        return None
 
 
 async def post_stories_to_telegram(
     stories: list[dict],
     channel: str | int,
     posted_media_hashes: set[str],
+    new_story_target: int | None = None,
 ) -> set[str]:
     """Post stories to a Telegram channel with multi-layer media dedup.
 
@@ -721,11 +892,13 @@ async def post_stories_to_telegram(
     client = await connect_telegram()
     if client is None:
         log("Telegram credentials missing; skipping channel posting.", error=True)
+        for story in stories:
+            story["_post_success"] = False
         return posted_media_hashes
 
     bot_client = await connect_telegram_bot()
     sender = bot_client if bot_client is not None else client
-    buttons = [[Button.inline("ספר לי עוד על זה", b"px")]] if bot_client else None
+    buttons = [[Button.inline(PX_BUTTON_LABEL, b"px")]] if bot_client else None
     if bot_client is not None:
         log("Posting via bot client (Perplexity button enabled).")
 
@@ -742,18 +915,35 @@ async def post_stories_to_telegram(
     run_hashes: set[str] = set()
     run_content_hashes: set[str] = set()  # Track content hashes within this run
     run_video_urls: set[str] = set()  # Level 3: URL dedup safety net across stories
+    successful_new_stories = 0
 
     for i, story in enumerate(stories):
+        is_update = story.get("history_index") is not None
+        if (
+            not is_update
+            and new_story_target is not None
+            and successful_new_stories >= new_story_target
+        ):
+            story["_post_success"] = False
+            story["_post_skipped_quota"] = True
+            log(
+                f"  [SKIP-EXTRA rank={story.get('_candidate_rank')}] "
+                f"New-story target already reached: {_story_preview(story)}"
+            )
+            continue
+
         try:
-            is_update = story.get("history_index") is not None
+            story_hashes: set[str] = set()
+            story_video_urls: set[str] = set()
             story_text = story.get("text", "")
             if is_update:
                 story_text = "**עדכון**\n\n" + story_text
-            text = wrap_with_divider(story_text)
+            text = _md_to_html(wrap_with_divider(story_text))
 
             image_buffers = []
             async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http:
-                for url in story.get("media_urls", [])[:10]:
+                media_urls = [] if is_update else story.get("media_urls", [])[:10]
+                for url in media_urls:
                     try:
                         resp = await http.get(url)
                         if resp.status_code != 200:
@@ -761,15 +951,14 @@ async def post_stories_to_telegram(
                         data = resp.content
                         h = hashlib.md5(data).hexdigest()
                         # Layer 2 dedup: Skip if already downloaded in this run
-                        if h in run_content_hashes:
+                        if h in run_content_hashes or h in story_hashes:
                             log(f"  Skipping duplicate image content in run: {url}")
                             continue
                         # Layer 3 dedup: Skip if posted in previous runs
                         if h in posted_media_hashes:
                             log(f"  Skipping image posted in previous run: {url}")
                             continue
-                        run_hashes.add(h)
-                        run_content_hashes.add(h)
+                        story_hashes.add(h)
                         content_type = resp.headers.get("content-type", "")
                         ext_map = {"image/png": "png", "image/gif": "gif", "image/webp": "webp"}
                         ext = ext_map.get(content_type.split(";")[0].strip(), "jpg")
@@ -781,8 +970,9 @@ async def post_stories_to_telegram(
 
             video_buffers = []
             async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as http:
-                for url in story.get("video_urls", [])[:5]:
-                    if url in run_video_urls:
+                video_urls = [] if is_update else story.get("video_urls", [])[:5]
+                for url in video_urls:
+                    if url in run_video_urls or url in story_video_urls:
                         log(f"  [VIDEO-DEDUP] Skipping already-downloaded video URL: {url}")
                         continue
                     try:
@@ -791,11 +981,11 @@ async def post_stories_to_telegram(
                             continue
                         data = resp.content
                         h = hashlib.md5(data).hexdigest()
-                        if h in posted_media_hashes or h in run_hashes:
+                        if h in posted_media_hashes or h in run_hashes or h in story_hashes:
                             log(f"  [VIDEO-DEDUP] Skipping by content hash: {url}")
                             continue
-                        run_hashes.add(h)
-                        run_video_urls.add(url)
+                        story_hashes.add(h)
+                        story_video_urls.add(url)
                         buf = io.BytesIO(data)
                         buf.name = f"video_{i}_{len(video_buffers)}.mp4"
                         video_buffers.append(buf)
@@ -804,17 +994,21 @@ async def post_stories_to_telegram(
 
             if not video_buffers:
                 async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http:
-                    for url in story.get("video_thumb_urls", [])[:5]:
+                    thumb_urls = [] if is_update else story.get("video_thumb_urls", [])[:5]
+                    for url in thumb_urls:
                         try:
                             resp = await http.get(url)
                             if resp.status_code != 200:
                                 continue
                             data = resp.content
                             h = hashlib.md5(data).hexdigest()
-                            if h in run_content_hashes or h in posted_media_hashes:
+                            if (
+                                h in run_content_hashes
+                                or h in story_hashes
+                                or h in posted_media_hashes
+                            ):
                                 continue
-                            run_content_hashes.add(h)
-                            run_hashes.add(h)
+                            story_hashes.add(h)
                             buf = io.BytesIO(data)
                             buf.name = f"thumb_{i}_{len(image_buffers)}.jpg"
                             image_buffers.append(buf)
@@ -823,26 +1017,53 @@ async def post_stories_to_telegram(
 
             all_media = video_buffers + image_buffers
             if not all_media:
-                text = "‎\n\n\n" + text
+                text = "\n" + text
             if all_media:
                 await sender.send_file(entity, file=all_media)
-                await sender.send_message(entity, text, parse_mode="md", link_preview=False, buttons=buttons)
-            else:
-                await sender.send_message(entity, text, parse_mode="md", link_preview=False, buttons=buttons)
+            sent_message = await sender.send_message(
+                entity,
+                text,
+                parse_mode="html",
+                link_preview=False,
+                buttons=buttons,
+                reply_to=story.get("reply_to_message_id") if is_update else None,
+            )
+            story["telegram_message_id"] = sent_message.id
+            story["telegram_posted"] = True
+            story["_post_success"] = True
+            run_hashes.update(story_hashes)
+            run_content_hashes.update(story_hashes)
+            run_video_urls.update(story_video_urls)
+            if not is_update:
+                successful_new_stories += 1
 
             label = "UPDATE" if is_update else "NEW"
             media_summary = f"{len(image_buffers)} img, {len(video_buffers)} vid"
-            log(f"  [{label}] Posted to Telegram ({media_summary}): {_story_preview(story)}")
+            reply_summary = (
+                f", reply_to={story.get('reply_to_message_id')}" if is_update else ""
+            )
+            log(
+                f"  [{label}] Posted to Telegram (message_id={sent_message.id}, "
+                f"{media_summary}{reply_summary}): {_story_preview(story)}"
+            )
             await asyncio.sleep(1.5)
 
         except Exception as e:
-            log(f"  Failed to post story {i}: {e}", error=True)
+            story["_post_success"] = False
+            log(
+                f"  [POST-FAILED rank={story.get('_candidate_rank')}] "
+                f"{_story_preview(story)}: {e}",
+                error=True,
+            )
 
     posted_media_hashes.update(run_hashes)
     await client.disconnect()
     if bot_client is not None:
         await bot_client.disconnect()
-    log(f"Telegram posting complete. {len(run_hashes)} new media hashes tracked.")
+    log(
+        f"Telegram posting complete. {successful_new_stories} new stories posted "
+        f"(target={new_story_target}); {len(run_hashes)} new media hashes tracked."
+    )
     return posted_media_hashes
 
 
@@ -1031,10 +1252,15 @@ def main():
     config = load_config()
     provider = build_provider(config)
     max_posts_per_call = int(config.get("channel_max_posts_per_call", 100))
-    max_stories = int(config.get("channel_max_stories", 3))
+    configured_max_stories = int(config.get("channel_max_stories", 3))
+    history_validation_enabled = config.get("channel_history_validation_enabled", True)
+    log(
+        f"History validation is {'enabled' if history_validation_enabled else 'disabled'} "
+        f"(config key channel_history_validation_enabled, default=true)."
+    )
 
     try:
-        prompt = PROMPT_PATH.read_text(encoding="utf-8").replace("{max_stories}", str(max_stories))
+        prompt = PROMPT_PATH.read_text(encoding="utf-8")
     except FileNotFoundError:
         log(f"Error: prompt file not found at {PROMPT_PATH}", error=True)
         sys.exit(1)
@@ -1094,12 +1320,23 @@ def main():
 
     full_history, processed_keys, posted_media_hashes, processed_post_texts = load_history()
     full_history.sort(key=lambda s: s.get("updated_at") or s.get("created_at") or "")
-    recent_history = full_history[-100:]
-    offset = len(full_history) - len(recent_history)
+    offset = 0
+    max_stories, candidate_count = _story_counts(
+        configured_max_stories,
+        has_history=bool(full_history),
+    )
     if full_history:
-        log(f"Loaded {len(full_history)} stories from history (using last {len(recent_history)} for local dedup; history is NOT sent to the LLM).")
+        posted_count = len(_posted_history_for_validation(full_history))
+        log(
+            f"Loaded {len(full_history)} generated stories from history "
+            f"({posted_count} treated as previously posted to Telegram)."
+        )
     else:
-        log("No history found — first run.")
+        log(
+            f"No history found — first run. Ignoring configured story target "
+            f"{configured_max_stories} and requesting exactly {FIRST_RUN_STORY_COUNT} stories."
+        )
+    prompt = prompt.replace("{max_stories}", str(candidate_count))
 
     new_posts = [p for p in all_posts if _post_key(p) not in processed_keys]
     log(f"Filtered posts: {len(new_posts)} new out of {len(all_posts)} total ({len(all_posts) - len(new_posts)} already processed).")
@@ -1139,49 +1376,76 @@ def main():
     user_content = json.dumps({"new_posts": slim}, ensure_ascii=False)
 
     log(f"Sending to {type(provider).__name__} for analysis...")
-    stories = call_provider(provider, prompt, user_content)
+    generated_candidates = sorted(
+        call_provider(provider, prompt, user_content),
+        key=_story_importance_rank,
+    )[:candidate_count]
+    log(
+        f"Model generated {len(generated_candidates)} ranked candidate(s); "
+        f"requested={candidate_count}, effective new-story target={max_stories}."
+    )
 
-    # Classify each story against history: new / update / duplicate
-    final_stories: list[dict] = []
-    update_batch: list[dict] = []  # pairs for the batch rewrite call
+    stories: list[dict] = []
+    if history_validation_enabled:
+        posted_history = _posted_history_for_validation(full_history)
+        accepted_new_count = 0
+        for rank, story in enumerate(generated_candidates, start=1):
+            decision = validate_story_candidate(story, rank, posted_history, provider)
+            classification = decision["classification"]
+            if classification == "duplicate":
+                continue
 
-    for story in stories:
-        classification, h_idx = check_story_against_history(story, recent_history)
-        if classification == "duplicate":
-            log(f"  [SKIP-DUPLICATE] {_story_preview(story)}")
-        elif classification == "update":
-            log(f"  [UPDATE for #{offset + h_idx}] {_story_preview(story)}")
-            update_batch.append({
-                "batch_pos": len(final_stories),
-                "history_idx": h_idx,
-                "new_story": story["text"],
-                "existing_story": recent_history[h_idx].get("text", ""),
-            })
-            story["history_index"] = offset + h_idx
-            final_stories.append(story)
-        else:
-            log(f"  [NEW] {_story_preview(story)}")
-            final_stories.append(story)
+            story["_candidate_rank"] = rank
+            story["validation_reason"] = decision["reason"]
+            if classification == "update":
+                history_index = decision["matched_history_index"]
+                matched_story = full_history[history_index]
+                original_message_id = matched_story.get("telegram_message_id")
+                if original_message_id is None:
+                    log(
+                        f"  [REJECT-UPDATE rank={rank}] Cannot reply because matched "
+                        f"history #{history_index} has no Telegram message ID. "
+                        f"existing={_story_preview(matched_story)!r}",
+                        error=True,
+                    )
+                    continue
+                story["text"] = decision["additional_info"]
+                story["history_index"] = history_index
+                story["reply_to_message_id"] = original_message_id
+            else:
+                story.pop("history_index", None)
+                story.pop("reply_to_message_id", None)
+            stories.append(story)
+            if classification == "new":
+                accepted_new_count += 1
+                if accepted_new_count >= max_stories:
+                    log(
+                        f"Reached effective new-story target={max_stories}; "
+                        "skipping validation of lower-ranked candidates."
+                    )
+                    break
+    else:
+        stories = generated_candidates[:max_stories]
+        for rank, story in enumerate(stories, start=1):
+            story["_candidate_rank"] = rank
+            story.pop("history_index", None)
+            story.pop("reply_to_message_id", None)
+        log(
+            f"History validation disabled; selected the first {len(stories)} "
+            "candidate(s) by model importance ranking."
+        )
 
-    # Single batch Mistral call to rewrite update texts to "new facts only"
-    if update_batch:
-        log(f"Rewriting {len(update_batch)} update story texts in batch...")
-        pairs = [{"index": u["batch_pos"], "new_story": u["new_story"], "existing_story": u["existing_story"]}
-                 for u in update_batch]
-        rewritten = rewrite_updates_batch(pairs, provider)
-        for item in rewritten:
-            pos = item.get("index")
-            new_text = item.get("update_text", "").strip()
-            if pos is not None and 0 <= pos < len(final_stories) and new_text:
-                final_stories[pos]["text"] = new_text
-
-    stories = final_stories
+    valid_new_count = sum(s.get("history_index") is None for s in stories)
+    update_count = len(stories) - valid_new_count
+    log(
+        f"Validation complete: {valid_new_count} ranked new candidate(s), "
+        f"{update_count} update(s); updates do not count toward target={max_stories}."
+    )
     stories = resolve_media_urls(stories, new_posts, base_url)
-
-    save_history(stories, full_history, offset, new_posts, processed_keys, posted_media_hashes, processed_post_texts)
 
     tg_channel = os.environ.get("TEST_DIGEST_TELEGRAM_CHANNEL" if args.test else "DIGEST_TELEGRAM_CHANNEL", "")
     log(f"[DEBUG] args.test={args.test}, tg_channel={repr(tg_channel)}, stories={len(stories)}, POST_TO_CHANNEL={POST_TO_CHANNEL}, no_telegram={args.no_telegram}")
+    history_items: list[dict] = []
     if POST_TO_CHANNEL and tg_channel and stories and not args.no_telegram:
         if tg_channel.lstrip("-").isdigit():
             tg_channel = int(tg_channel)
@@ -1194,9 +1458,14 @@ def main():
             log("Video support disabled; skipping video resolution.")
         log(f"Posting {len(stories)} stories to Telegram channel {tg_channel}...")
         posted_media_hashes = asyncio.run(
-            post_stories_to_telegram(stories, tg_channel, posted_media_hashes)
+            post_stories_to_telegram(
+                stories,
+                tg_channel,
+                posted_media_hashes,
+                new_story_target=max_stories,
+            )
         )
-        save_history([], full_history, offset, [], processed_keys, posted_media_hashes, processed_post_texts)
+        history_items = [story for story in stories if story.get("_post_success")]
     elif args.no_telegram:
         log("--no-telegram flag supplied; skipping Telegram posting.")
     elif not POST_TO_CHANNEL:
@@ -1204,7 +1473,36 @@ def main():
     elif not tg_channel:
         log("DIGEST_TELEGRAM_CHANNEL not set; skipping Telegram posting.")
 
-    log(f"Received {len(stories)} new items. Generating HTML from full history ({len(full_history)} stories)...")
+    if not (POST_TO_CHANNEL and tg_channel and stories and not args.no_telegram):
+        history_items = [
+            story
+            for story in stories
+            if story.get("history_index") is None
+        ][:max_stories]
+        for story in history_items:
+            story["telegram_posted"] = False
+
+    save_history(
+        history_items,
+        full_history,
+        offset,
+        new_posts,
+        processed_keys,
+        posted_media_hashes,
+        processed_post_texts,
+    )
+
+    posted_new_count = sum(
+        s.get("history_index") is None and s.get("_post_success") for s in stories
+    )
+    posted_update_count = sum(
+        s.get("history_index") is not None and s.get("_post_success") for s in stories
+    )
+    log(
+        f"Run result: {posted_new_count} new stories posted "
+        f"(effective target={max_stories}), {posted_update_count} updates posted. "
+        f"Generating HTML from full history ({len(full_history)} stories)..."
+    )
     generate_html(full_history, args.output)
 
 
