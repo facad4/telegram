@@ -767,13 +767,17 @@
         padding: 0 8px;
         gap: 0;
         overflow-x: hidden;
-        justify-content: stretch;
+        justify-content: space-evenly;
       }
 
-      .nav-links,
       .control-buttons,
       .header-right {
         display: contents;
+      }
+
+      .nav-links {
+        display: flex;
+        flex: 0 0 43px;
       }
 
       .username-display,
@@ -789,7 +793,7 @@
       .header .control-btn,
       .header .filter-wrapper,
       .header .logout-btn {
-        flex: 1 1 0 !important;
+        flex: 0 1 30px !important;
         display: flex !important;
         align-items: center;
         justify-content: center;
@@ -797,6 +801,11 @@
         border: none !important;
         min-width: 0;
         white-space: nowrap;
+      }
+
+      .header #mainFeedLink {
+        flex: 1 1 auto !important;
+        width: 100%;
       }
 
       /* Keep top-bar spacing stable while tapping icons on mobile */
@@ -1124,7 +1133,12 @@
       text-decoration: none;
       font-weight: 600;
       font-size: 1rem;
-      padding: 6px 12px;
+      padding: 6px 28px;
+      min-width: 64px;
+      box-sizing: border-box;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       border-radius: 8px;
       transition: all 0.2s;
     }
