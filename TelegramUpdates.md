@@ -1293,7 +1293,7 @@ A long-running Telethon **bot** listener (run separately via systemd / Task Sche
 - **Progress narration**: while enrichment runs, the message is edited through Hebrew phase labels (loading → searching → filtering → summarizing → verifying → finishing), editing only on phase changes to avoid Telegram edit-flood limits
 - **Enrichment**: runs `WebSearch` (Mistral + Tavily) fresh using the `perplexity_prompt_enricher.md` prompt, constrained to Telegram's caption/message character limit (1024 with media, 4096 without) via the `max_chars` parameter
 - Edits the channel message to append an expandable `<blockquote expandable>` with the enriched answer (markdown bold converted to HTML)
-- Uses `SetThreadExecutionState` (Windows) to keep the host awake while running
+- Keeps the host awake while running: `SetThreadExecutionState` on Windows, `caffeinate -is` on macOS; no-op on other platforms
 
 #### `perplexity_search.py` (`PerplexitySearch`)
 Alternative enrichment backend that queries the public **perplexity.ai** website via a headless Playwright Chromium browser (no API key/login). Submits `{prompt}\n\n{query}` (prompt from `perplexity_prompt.md`), waits for the streamed answer to stabilize, and extracts the answer text plus de-duplicated source links. One-time setup: `python -m playwright install chromium`.

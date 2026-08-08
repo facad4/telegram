@@ -12,17 +12,14 @@ Run via systemd / Task Scheduler / NSSM:
 
 import argparse
 import asyncio
-import ctypes
 import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import time
 from pathlib import Path
-
-_ES_CONTINUOUS        = 0x80000000
-_ES_SYSTEM_REQUIRED   = 0x00000001
-_ES_DISPLAY_REQUIRED  = 0x00000002
 
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
@@ -31,6 +28,47 @@ from perplexity_marker import PX_MARKER
 from web_search import WebSearch
 
 load_dotenv()
+
+
+class _KeepAwake:
+    """Prevent the host from sleeping while the listener is running.
+
+    Windows: SetThreadExecutionState. macOS: caffeinate. Other platforms: no-op.
+    """
+
+    def __init__(self):
+        self._caffeinate: subprocess.Popen | None = None
+
+    def __enter__(self):
+        if sys.platform == "win32":
+            import ctypes
+            ES_CONTINUOUS = 0x80000000
+            ES_SYSTEM_REQUIRED = 0x00000001
+            ES_DISPLAY_REQUIRED = 0x00000002
+            ctypes.windll.kernel32.SetThreadExecutionState(
+                ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+            )
+        elif sys.platform == "darwin":
+            # -i: prevent idle sleep; -s: prevent system sleep on AC power
+            self._caffeinate = subprocess.Popen(
+                ["caffeinate", "-is"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        return self
+
+    def __exit__(self, *exc):
+        if sys.platform == "win32":
+            import ctypes
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)  # ES_CONTINUOUS
+        elif self._caffeinate is not None:
+            self._caffeinate.terminate()
+            try:
+                self._caffeinate.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._caffeinate.kill()
+            self._caffeinate = None
+        return False
 
 
 def _load_config() -> dict:
@@ -224,10 +262,5 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     _headless = not args.head
-    ctypes.windll.kernel32.SetThreadExecutionState(
-        _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED | _ES_DISPLAY_REQUIRED
-    )
-    try:
+    with _KeepAwake():
         asyncio.run(main())
-    finally:
-        ctypes.windll.kernel32.SetThreadExecutionState(_ES_CONTINUOUS)
