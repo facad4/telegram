@@ -48,6 +48,10 @@ def _log_err(msg: str) -> None:
     print(f"[{ts}] {msg}", file=sys.stderr)
 
 
+class ProviderRequestError(Exception):
+    """Raised when an AI provider request fails unrecoverably (bad status, exhausted retries, missing key)."""
+
+
 class AIProvider:
     """Base class for OpenAI-compatible chat-completion providers returning JSON."""
     BASE_URL = ""
@@ -61,10 +65,12 @@ class AIProvider:
         self.max_tokens = max_tokens if max_tokens is not None else self.DEFAULT_MAX_TOKENS
 
     def chat_json(self, system_prompt: str, user_content: str,
-                  temperature: float = 0.2, timeout: float = 300.0) -> str:
+                  temperature: float = 0.2, timeout: float = 300.0,
+                  max_tokens: int | None = None) -> str:
         if not self.api_key:
-            _log_err(f"Error: API key for {type(self).__name__} is empty.")
-            sys.exit(1)
+            msg = f"API key for {type(self).__name__} is empty."
+            _log_err(f"Error: {msg}")
+            raise ProviderRequestError(msg)
         body = {
             "model": self.model,
             "temperature": temperature,
@@ -76,11 +82,12 @@ class AIProvider:
         }
         if self.SUPPORTS_JSON_RESPONSE_FORMAT:
             body["response_format"] = {"type": "json_object"}
-        if self.max_tokens:
-            body["max_tokens"] = self.max_tokens
+        effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
+        if effective_max_tokens:
+            body["max_tokens"] = effective_max_tokens
 
         timeout_obj = httpx.Timeout(timeout, connect=30.0, read=timeout, write=60.0, pool=30.0)
-        transient_status = {500, 502, 503, 504}
+        transient_status = {429, 500, 502, 503, 504}
         transient_excs = (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectError, httpx.ReadError)
         backoff = [5, 15, 30]
         last_error = ""
@@ -106,8 +113,9 @@ class AIProvider:
                         raise httpx.RemoteProtocolError(last_error)
                     if resp.status_code != 200:
                         err_body = resp.read().decode(errors="replace")
-                        _log_err(f"{provider_name} API error (HTTP {resp.status_code}): {err_body[:500]}")
-                        sys.exit(1)
+                        msg = f"{provider_name} API error (HTTP {resp.status_code}): {err_body[:500]}"
+                        _log_err(msg)
+                        raise ProviderRequestError(msg)
                     finish_reason = None
                     got_done = False
                     for line in resp.iter_lines():
@@ -149,7 +157,7 @@ class AIProvider:
                 last_error = last_error or f"{type(e).__name__}: {e}"
                 if attempt >= len(backoff):
                     _log_err(f"{provider_name} transient failure after {attempt + 1} attempts: {last_error}")
-                    sys.exit(1)
+                    raise ProviderRequestError(last_error)
                 wait = backoff[attempt]
                 _log_err(f"{provider_name} transient failure ({last_error}); retrying in {wait}s (attempt {attempt + 2}/{len(backoff) + 1})...")
                 time.sleep(wait)
@@ -211,8 +219,10 @@ PROMPT_PATH = Path(__file__).parent / "alternate_feed_prompt.md"
 CONFIG_PATH = Path(__file__).parent / "config.json"
 HISTORY_PATH = Path(__file__).parent / "digest_history.json"
 NIM_KEY_STATE_PATH = Path(__file__).parent / "test_nim_key_state.json"
-NIM_KEY_ENV_NAMES = ["NVIDIA_API_KEY", "NIM_UNIFEED"]
+NIM_KEY_ENV_NAMES = ["NVIDIA_API_KEY", "NIM_UNIFEED", "NVIDIA_API_KEY_2"]
 FIRST_RUN_STORY_COUNT = 10
+VALIDATE_CALL_PACING_SECONDS = 5
+VALIDATE_MAX_TOKENS = 6144
 
 # --- Script Configuration ---
 POST_TO_CHANNEL = True   # Post stories to the Telegram channel (requires DIGEST_TELEGRAM_CHANNEL env var)
@@ -480,7 +490,6 @@ def deduplicate_posts(posts: list[dict], similarity_threshold: float = 0.85) -> 
                 if ratio > 0.80:
                     # Also check fuzzy similarity
                     similarity = _text_similarity(text_i, text_j)
-                    log(f"  [DEBUG] Comparing posts {i} vs {j}: len_ratio={ratio:.1%}, similarity={similarity:.4f}")
                     if similarity > similarity_threshold:
                         log(f"    → MATCH! Marking post {j} as duplicate")
                         duplicates.append(j)
@@ -644,6 +653,7 @@ def validate_story_candidate(
         ),
         temperature=0.0,
         timeout=900.0,
+        max_tokens=VALIDATE_MAX_TOKENS,
     )
     content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
@@ -1376,8 +1386,13 @@ def main():
     user_content = json.dumps({"new_posts": slim}, ensure_ascii=False)
 
     log(f"Sending to {type(provider).__name__} for analysis...")
+    try:
+        raw_candidates = call_provider(provider, prompt, user_content)
+    except ProviderRequestError as e:
+        log(f"Story generation failed: {e}. Nothing to save this run.", error=True)
+        sys.exit(1)
     generated_candidates = sorted(
-        call_provider(provider, prompt, user_content),
+        raw_candidates,
         key=_story_importance_rank,
     )[:candidate_count]
     log(
@@ -1390,7 +1405,17 @@ def main():
         posted_history = _posted_history_for_validation(full_history)
         accepted_new_count = 0
         for rank, story in enumerate(generated_candidates, start=1):
-            decision = validate_story_candidate(story, rank, posted_history, provider)
+            if rank > 1:
+                time.sleep(VALIDATE_CALL_PACING_SECONDS)
+            try:
+                decision = validate_story_candidate(story, rank, posted_history, provider)
+            except ProviderRequestError as e:
+                log(
+                    f"Validation stopped early at rank={rank} due to a provider error: {e}. "
+                    f"Proceeding with {len(stories)} already-validated stor{'y' if len(stories) == 1 else 'ies'} from this run.",
+                    error=True,
+                )
+                break
             classification = decision["classification"]
             if classification == "duplicate":
                 continue

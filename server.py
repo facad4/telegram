@@ -125,6 +125,22 @@ _video_cdn_cache: dict[str, tuple[float, str]] = {}
 _telegram_download_semaphore = asyncio.Semaphore(5)
 VIDEO_MEMORY_TTL = 300
 CDN_URL_TTL = 3600
+_telegram_reconnect_lock = asyncio.Lock()
+
+
+async def _ensure_telegram_connected(tg: TelegramClient) -> bool:
+    """Reconnect a dropped Telethon client. Concurrent callers share one reconnect attempt."""
+    if tg.is_connected():
+        return True
+    async with _telegram_reconnect_lock:
+        if tg.is_connected():
+            return True
+        try:
+            await tg.connect()
+            logger.info("Telegram client reconnected")
+        except Exception as e:
+            logger.error("Telegram client reconnect failed: %s", e)
+        return tg.is_connected()
 
 
 def _cleanup_video_cache():
@@ -415,103 +431,121 @@ async def fetch_channel_posts_telethon(
 
     channel_ref: username (str) for public channels, numeric ID (int) for private.
     media_sem: shared semaphore that caps concurrent media downloads.
+    Retries once (after a shared reconnect) if the client had dropped its connection.
     """
     if media_sem is None:
         media_sem = asyncio.Semaphore(5)
 
     try:
-        entity = await tg.get_entity(channel_ref)
-        channel_title = getattr(entity, "title", str(channel_ref))
-        username = getattr(entity, "username", None)
-
-        cache_key = str(username or getattr(entity, "id", channel_ref)).replace("/", "_")
-        cache_path = AVATAR_CACHE_DIR / f"{cache_key}.jpg"
-        channel_photo = None
-
-        if cache_path.exists() and (time.time() - cache_path.stat().st_mtime) < AVATAR_TTL_SECONDS:
-            channel_photo = f"/api/avatar/{cache_key}"
-        else:
-            try:
-                photo_file = await tg.download_profile_photo(entity, file=bytes)
-                if photo_file:
-                    cache_path.write_bytes(photo_file)
-                    channel_photo = f"/api/avatar/{cache_key}"
-            except Exception:
-                pass
-
-        messages = await tg.get_messages(entity, limit=limit)
-
-        filtered = [m for m in messages if m.text is not None or m.media is not None]
-
-        if username:
-            channel_name = username
-        else:
-            real_id = getattr(entity, "id", channel_ref)
-            channel_name = str(real_id)
-
-        _cleanup_pending_thumbs()
-
-        raw_posts = []
-        for msg in filtered:
-            text_plain = msg.text or ""
-            text_html = f"<div>{text_plain.replace(chr(10), '<br>')}</div>" if text_plain else ""
-            views = str(msg.views) if msg.views else ""
-            datetime_str = msg.date.isoformat() if msg.date else ""
-
-            if username:
-                post_url = f"https://t.me/{username}/{msg.id}"
-            else:
-                post_url = f"https://t.me/c/{real_id}/{msg.id}"
-
-            photo_url = None
-            has_video = False
-            video_thumb = None
-            video_url = None
-
-            if isinstance(msg.media, MessageMediaPhoto):
-                thumb_key = f"{channel_name}_{msg.id}"
-                cache_path = THUMB_CACHE_DIR / f"{thumb_key}.jpg"
-                if cache_path.exists() and (time.time() - cache_path.stat().st_mtime) < THUMB_TTL_SECONDS:
-                    photo_url = f"/api/thumb/{thumb_key}"
-                else:
-                    _pending_thumbs[thumb_key] = (time.time(), msg.media)
-                    photo_url = f"/api/thumb/{thumb_key}"
-            elif isinstance(msg.media, MessageMediaDocument) and username:
-                doc = msg.media.document
-                if doc and any(isinstance(a, DocumentAttributeVideo) for a in (doc.attributes or [])):
-                    has_video = True
-                    video_key = f"{channel_name}_{msg.id}"
-                    _video_refs[video_key] = (msg.media, doc.size or 0)
-                    video_url = None
-                    
-                    thumb_key = f"{channel_name}_{msg.id}"
-                    _pending_thumbs[thumb_key] = (time.time(), msg.media)
-                    video_thumb = f"/api/thumb/{thumb_key}"
-
-            raw_posts.append({
-                "channel": channel_name,
-                "channel_title": channel_title,
-                "channel_photo": channel_photo,
-                "post_id": str(msg.id),
-                "post_url": post_url,
-                "text_html": text_html,
-                "text_plain": text_plain,
-                "views": views,
-                "datetime": datetime_str,
-                "photo_url": photo_url,
-                "video_thumb": video_thumb,
-                "video_url": video_url,
-                "has_video": has_video,
-                "link_preview": None,
-                "channel_subscribers": getattr(entity, "participants_count", None),
-                "_grouped_id": getattr(msg, "grouped_id", None),
-            })
-
-        posts = _merge_telethon_grouped(raw_posts)
-        return posts
+        return await _fetch_channel_posts_telethon_once(tg, channel_ref, limit, media_sem)
+    except ConnectionError as e:
+        logger.warning("Telethon disconnected while fetching %s, reconnecting: %s", channel_ref, e)
+        if not await _ensure_telegram_connected(tg):
+            logger.error("Failed to fetch channel %s via Telethon: reconnect failed", channel_ref)
+            return []
+        try:
+            return await _fetch_channel_posts_telethon_once(tg, channel_ref, limit, media_sem)
+        except Exception as e2:
+            logger.error("Failed to fetch channel %s via Telethon after reconnect: %s", channel_ref, e2)
+            return []
     except Exception as e:
         logger.error("Failed to fetch channel %s via Telethon: %s", channel_ref, e)
         return []
+
+
+async def _fetch_channel_posts_telethon_once(
+    tg: TelegramClient, channel_ref: int | str, limit: int,
+    media_sem: asyncio.Semaphore,
+) -> list[dict]:
+    entity = await tg.get_entity(channel_ref)
+    channel_title = getattr(entity, "title", str(channel_ref))
+    username = getattr(entity, "username", None)
+
+    cache_key = str(username or getattr(entity, "id", channel_ref)).replace("/", "_")
+    cache_path = AVATAR_CACHE_DIR / f"{cache_key}.jpg"
+    channel_photo = None
+
+    if cache_path.exists() and (time.time() - cache_path.stat().st_mtime) < AVATAR_TTL_SECONDS:
+        channel_photo = f"/api/avatar/{cache_key}"
+    else:
+        try:
+            photo_file = await tg.download_profile_photo(entity, file=bytes)
+            if photo_file:
+                cache_path.write_bytes(photo_file)
+                channel_photo = f"/api/avatar/{cache_key}"
+        except Exception:
+            pass
+
+    messages = await tg.get_messages(entity, limit=limit)
+
+    filtered = [m for m in messages if m.text is not None or m.media is not None]
+
+    if username:
+        channel_name = username
+    else:
+        real_id = getattr(entity, "id", channel_ref)
+        channel_name = str(real_id)
+
+    _cleanup_pending_thumbs()
+
+    raw_posts = []
+    for msg in filtered:
+        text_plain = msg.text or ""
+        text_html = f"<div>{text_plain.replace(chr(10), '<br>')}</div>" if text_plain else ""
+        views = str(msg.views) if msg.views else ""
+        datetime_str = msg.date.isoformat() if msg.date else ""
+
+        if username:
+            post_url = f"https://t.me/{username}/{msg.id}"
+        else:
+            post_url = f"https://t.me/c/{real_id}/{msg.id}"
+
+        photo_url = None
+        has_video = False
+        video_thumb = None
+        video_url = None
+
+        if isinstance(msg.media, MessageMediaPhoto):
+            thumb_key = f"{channel_name}_{msg.id}"
+            cache_path = THUMB_CACHE_DIR / f"{thumb_key}.jpg"
+            if cache_path.exists() and (time.time() - cache_path.stat().st_mtime) < THUMB_TTL_SECONDS:
+                photo_url = f"/api/thumb/{thumb_key}"
+            else:
+                _pending_thumbs[thumb_key] = (time.time(), msg.media)
+                photo_url = f"/api/thumb/{thumb_key}"
+        elif isinstance(msg.media, MessageMediaDocument) and username:
+            doc = msg.media.document
+            if doc and any(isinstance(a, DocumentAttributeVideo) for a in (doc.attributes or [])):
+                has_video = True
+                video_key = f"{channel_name}_{msg.id}"
+                _video_refs[video_key] = (msg.media, doc.size or 0)
+                video_url = None
+
+                thumb_key = f"{channel_name}_{msg.id}"
+                _pending_thumbs[thumb_key] = (time.time(), msg.media)
+                video_thumb = f"/api/thumb/{thumb_key}"
+
+        raw_posts.append({
+            "channel": channel_name,
+            "channel_title": channel_title,
+            "channel_photo": channel_photo,
+            "post_id": str(msg.id),
+            "post_url": post_url,
+            "text_html": text_html,
+            "text_plain": text_plain,
+            "views": views,
+            "datetime": datetime_str,
+            "photo_url": photo_url,
+            "video_thumb": video_thumb,
+            "video_url": video_url,
+            "has_video": has_video,
+            "link_preview": None,
+            "channel_subscribers": getattr(entity, "participants_count", None),
+            "_grouped_id": getattr(msg, "grouped_id", None),
+        })
+
+    posts = _merge_telethon_grouped(raw_posts)
+    return posts
 
 
 @app.get("/api/avatar/{channel_key}")
