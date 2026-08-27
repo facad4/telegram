@@ -42,10 +42,14 @@ if sys.stdout.encoding != "utf-8":
     sys.stderr.reconfigure(encoding="utf-8")
 load_dotenv()
 
+_LOG_BUFFER: list[str] = []
+
 
 def _log_err(msg: str) -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", file=sys.stderr)
+    line = f"[{ts}] {msg}"
+    print(line, file=sys.stderr)
+    _LOG_BUFFER.append(line)
 
 
 def _rate_limit_headers(headers) -> str:
@@ -101,7 +105,7 @@ class AIProvider:
         timeout_obj = httpx.Timeout(timeout, connect=30.0, read=timeout, write=60.0, pool=30.0)
         transient_status = {429, 500, 502, 503, 504}
         transient_excs = (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectError, httpx.ReadError)
-        backoff = [5, 15, 30]
+        backoff = [30, 30, 30]
         last_error = ""
         provider_name = type(self).__name__
         key_label = f" key={self.key_name}" if self.key_name else ""
@@ -239,6 +243,7 @@ NIM_KEY_ENV_NAMES = ["NVIDIA_API_KEY", "NIM_UNIFEED", "NVIDIA_API_KEY_2"]
 FIRST_RUN_STORY_COUNT = 10
 VALIDATE_CALL_PACING_SECONDS = 5
 VALIDATE_MAX_TOKENS = 6144
+RUN_LOG_CHANNEL = os.environ.get("RUN_LOG_TELEGRAM_CHANNEL", "@testzionism20")
 
 # --- Script Configuration ---
 POST_TO_CHANNEL = True   # Post stories to the Telegram channel (requires DIGEST_TELEGRAM_CHANNEL env var)
@@ -256,7 +261,9 @@ def _md_to_html(text: str) -> str:
 
 def log(msg: str, error: bool = False) -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", file=sys.stderr if error else sys.stdout)
+    line = f"[{ts}] {msg}"
+    print(line, file=sys.stderr if error else sys.stdout)
+    _LOG_BUFFER.append(line)
 
 
 def load_config() -> dict:
@@ -864,8 +871,16 @@ async def resolve_video_urls(stories: list[dict], original_posts: list[dict]) ->
     return stories
 
 
+_shared_user_client: TelegramClient | None = None
+_shared_bot_client: TelegramClient | None = None
+_bot_client_attempted = False
+
+
 async def connect_telegram() -> TelegramClient | None:
-    """Create and connect a Telethon client. Returns None if credentials are missing."""
+    """Return the cached Telethon user client for this run, connecting it on first use."""
+    global _shared_user_client
+    if _shared_user_client is not None:
+        return _shared_user_client
     api_id = os.environ.get("TELEGRAM_API_ID")
     api_hash = os.environ.get("TELEGRAM_API_HASH")
     session_str = os.environ.get("TELEGRAM_SESSION")
@@ -877,11 +892,16 @@ async def connect_telegram() -> TelegramClient | None:
         log("Telegram session is not authorized; posting disabled.", error=True)
         await client.disconnect()
         return None
+    _shared_user_client = client
     return client
 
 
 async def connect_telegram_bot() -> TelegramClient | None:
-    """Create an in-memory bot client, falling back cleanly if startup fails."""
+    """Return the cached Telethon bot client for this run, logging in on first use only."""
+    global _shared_bot_client, _bot_client_attempted
+    if _bot_client_attempted:
+        return _shared_bot_client
+    _bot_client_attempted = True
     api_id = os.environ.get("TELEGRAM_API_ID")
     api_hash = os.environ.get("TELEGRAM_API_HASH")
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -890,6 +910,7 @@ async def connect_telegram_bot() -> TelegramClient | None:
     client = TelegramClient(StringSession(), int(api_id), api_hash)
     try:
         await client.start(bot_token=bot_token)
+        _shared_bot_client = client
         return client
     except Exception as exc:
         log(
@@ -901,6 +922,46 @@ async def connect_telegram_bot() -> TelegramClient | None:
         except Exception:
             pass
         return None
+
+
+async def disconnect_telegram_clients() -> None:
+    """Disconnect any Telegram clients that were connected/cached during this run."""
+    global _shared_user_client, _shared_bot_client, _bot_client_attempted
+    if _shared_bot_client is not None:
+        await _shared_bot_client.disconnect()
+        _shared_bot_client = None
+    if _shared_user_client is not None:
+        await _shared_user_client.disconnect()
+        _shared_user_client = None
+    _bot_client_attempted = False
+
+
+async def _send_run_log_to_channel() -> None:
+    """Send the full captured run log to RUN_LOG_CHANNEL as a file attachment."""
+    if not _LOG_BUFFER:
+        return
+    log_text = "\n".join(_LOG_BUFFER)
+
+    channel = RUN_LOG_CHANNEL
+    if channel.lstrip("-").isdigit():
+        channel = int(channel)
+
+    client = await connect_telegram_bot()
+    if client is None:
+        client = await connect_telegram()
+        if client is None:
+            print("[run-log] Telegram credentials missing; cannot send run log.", file=sys.stderr)
+            return
+
+    try:
+        entity = await client.get_entity(channel)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        file_buf = io.BytesIO(log_text.encode("utf-8"))
+        file_buf.name = f"run_log_{ts}.txt"
+        await client.send_file(entity, file=file_buf, caption=f"Run log — {ts}")
+    except Exception as e:
+        print(f"[run-log] Failed to send run log: {e}", file=sys.stderr)
 
 
 async def post_stories_to_telegram(
@@ -933,9 +994,6 @@ async def post_stories_to_telegram(
         log(f"Posting {len(stories)} items to Telegram channel: {getattr(entity, 'title', channel)}")
     except Exception as e:
         log(f"Failed to resolve Telegram channel '{channel}': {e}", error=True)
-        await client.disconnect()
-        if bot_client is not None:
-            await bot_client.disconnect()
         return posted_media_hashes
 
     run_hashes: set[str] = set()
@@ -1083,9 +1141,6 @@ async def post_stories_to_telegram(
             )
 
     posted_media_hashes.update(run_hashes)
-    await client.disconnect()
-    if bot_client is not None:
-        await bot_client.disconnect()
     log(
         f"Telegram posting complete. {successful_new_stories} new stories posted "
         f"(target={new_story_target}); {len(run_hashes)} new media hashes tracked."
@@ -1242,7 +1297,7 @@ def generate_html(stories: list[dict], output_path: str) -> None:
     log(f"Digest written to {output_path} ({len(sorted_stories)} stories)")
 
 
-def main():
+async def main():
     global HISTORY_PATH
 
     parser = argparse.ArgumentParser(description="Generate an alternate-feed digest via Mistral AI.")
@@ -1319,7 +1374,7 @@ def main():
         single_stories = [story]
         single_stories = resolve_media_urls(single_stories, all_posts, base_url)
         if POST_VIDEOS:
-            single_stories = asyncio.run(resolve_video_urls(single_stories, all_posts))
+            single_stories = await resolve_video_urls(single_stories, all_posts)
 
         # Telegram media albums (multi-file send) silently drop inline buttons.
         # Cap to a single media item so the Perplexity button survives.
@@ -1341,7 +1396,7 @@ def main():
         if tg_channel.lstrip("-").isdigit():
             tg_channel = int(tg_channel)
         log(f"Posting single story to Telegram channel {tg_channel}...")
-        asyncio.run(post_stories_to_telegram(single_stories, tg_channel, set()))
+        await post_stories_to_telegram(single_stories, tg_channel, set())
         return
 
     full_history, processed_keys, posted_media_hashes, processed_post_texts = load_history()
@@ -1492,19 +1547,17 @@ def main():
             tg_channel = int(tg_channel)
         if POST_VIDEOS:
             log("Resolving video URLs from source posts...")
-            stories = asyncio.run(resolve_video_urls(stories, new_posts))
+            stories = await resolve_video_urls(stories, new_posts)
             video_count = sum(len(s.get("video_urls", [])) for s in stories)
             log(f"Found {video_count} video(s) across {len(stories)} stories.")
         else:
             log("Video support disabled; skipping video resolution.")
         log(f"Posting {len(stories)} stories to Telegram channel {tg_channel}...")
-        posted_media_hashes = asyncio.run(
-            post_stories_to_telegram(
-                stories,
-                tg_channel,
-                posted_media_hashes,
-                new_story_target=max_stories,
-            )
+        posted_media_hashes = await post_stories_to_telegram(
+            stories,
+            tg_channel,
+            posted_media_hashes,
+            new_story_target=max_stories,
         )
         history_items = [story for story in stories if story.get("_post_success")]
     elif args.no_telegram:
@@ -1547,5 +1600,13 @@ def main():
     generate_html(full_history, args.output)
 
 
+async def _run() -> None:
+    try:
+        await main()
+    finally:
+        await _send_run_log_to_channel()
+        await disconnect_telegram_clients()
+
+
 if __name__ == "__main__":
-    main()
+    asyncio.run(_run())
