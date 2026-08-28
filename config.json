@@ -13,5 +13,8 @@
   "context_tavily_max_results": 5,
   "channel_ai_provider": "nim",
   "channel_ai_model": "nvidia/nemotron-3-super-120b-a12b",
-  "channel_max_stories": 3
+  "channel_max_stories": 3,
+  "grammar_checker_provider": "groq",
+  "grammar_checker_model": "qwen/qwen3.8-27b",
+  "hostile_framing_screen_enabled": true
 }

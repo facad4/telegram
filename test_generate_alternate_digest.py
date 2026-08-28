@@ -62,6 +62,8 @@ class AIProvider:
     SUPPORTS_JSON_RESPONSE_FORMAT = True
     # Max output tokens to request. None => don't send the field (use provider default).
     DEFAULT_MAX_TOKENS: int | None = None
+    # Extra provider-specific fields merged into every request body.
+    EXTRA_BODY: dict = {}
 
     def __init__(self, api_key: str, model: str, max_tokens: int | None = None):
         self.api_key = api_key
@@ -86,6 +88,8 @@ class AIProvider:
         }
         if self.SUPPORTS_JSON_RESPONSE_FORMAT:
             body["response_format"] = {"type": "json_object"}
+        if self.EXTRA_BODY:
+            body.update(self.EXTRA_BODY)
         effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
         if effective_max_tokens:
             body["max_tokens"] = effective_max_tokens
@@ -177,20 +181,41 @@ class NIMProvider(AIProvider):
     BASE_URL = "https://integrate.api.nvidia.com/v1"
     # GLM on NIM honors OpenAI-style JSON mode; enforce valid JSON output.
     SUPPORTS_JSON_RESPONSE_FORMAT = True
+
+
+class GroqProvider(AIProvider):
+    BASE_URL = "https://api.groq.com/openai/v1"
+    # Qwen3 and other Groq reasoning models emit <think>...</think> in the content
+    # by default, which breaks json.loads(); "hidden" strips it from the response.
+    EXTRA_BODY = {"reasoning_format": "hidden"}
     # GLM-5.x has "thinking" enabled by default, so reasoning + output can exceed
     # NIM's implicit output cap and get truncated. Request a generous budget.
     DEFAULT_MAX_TOKENS = 32768
 
 
+_NIM_KEY_CACHE: tuple[str, str] | None = None
+
+
 def _next_nim_api_key() -> tuple[str, str]:
-    """Return (api_key, env_name), rotating across configured NIM keys per run."""
+    """Return (api_key, env_name), picking one key per run (rotated across configured keys).
+
+    The chosen key is cached for the lifetime of the process, so every provider built
+    during a run (story generation, grammar check, ...) shares the same NIM key and the
+    rotation index only advances once.
+    """
+    global _NIM_KEY_CACHE
+    if _NIM_KEY_CACHE is not None:
+        return _NIM_KEY_CACHE
+
     keys = [(n, os.environ.get(n, "").strip()) for n in NIM_KEY_ENV_NAMES]
     keys = [(n, v) for n, v in keys if v]
     if not keys:
-        return "", NIM_KEY_ENV_NAMES[0]
+        _NIM_KEY_CACHE = ("", NIM_KEY_ENV_NAMES[0])
+        return _NIM_KEY_CACHE
     if len(keys) == 1:
         log(f"[NIM] Only one key set ({keys[0][0]}); rotation disabled.")
-        return keys[0][1], keys[0][0]
+        _NIM_KEY_CACHE = (keys[0][1], keys[0][0])
+        return _NIM_KEY_CACHE
     try:
         last = int(json.loads(NIM_KEY_STATE_PATH.read_text()).get("last_index", -1))
     except (FileNotFoundError, json.JSONDecodeError, ValueError, TypeError):
@@ -202,7 +227,8 @@ def _next_nim_api_key() -> tuple[str, str]:
         log(f"[NIM] Could not persist key rotation state: {e}", error=True)
     name, value = keys[idx]
     log(f"[NIM] Using API key: {name} (rotation index {idx}/{len(keys)})")
-    return value, name
+    _NIM_KEY_CACHE = (value, name)
+    return _NIM_KEY_CACHE
 
 
 def build_provider(config: dict) -> AIProvider:
@@ -219,14 +245,45 @@ def build_provider(config: dict) -> AIProvider:
     raise ValueError(f"Unknown channel_ai_provider: {name!r}")
 
 
+def build_grammar_provider(config: dict) -> AIProvider | None:
+    """Build the provider for the Hebrew grammar/language-correction pass.
+
+    Reads the grammar_checker_* config keys (providers: nim, mistral, groq). Never
+    raises — returns None on an unknown provider so the digest run still proceeds.
+    """
+    name = (config.get("grammar_checker_provider") or "nim").lower()
+    model = config.get("grammar_checker_model")
+    if name == "nim":
+        api_key, _ = _next_nim_api_key()  # memoized — same key as story generation
+        return NIMProvider(api_key, model or "meta/llama-3.3-70b-instruct")
+    if name == "mistral":
+        return MistralProvider(os.environ.get("MISTRAL_API_KEY", ""),
+                               model or "mistral-large-latest")
+    if name == "groq":
+        return GroqProvider(os.environ.get("GROK_API_KEY", ""),
+                            model or "qwen/qwen3.8-27b")
+    log(f"Unknown grammar_checker_provider {name!r}; skipping grammar check.", error=True)
+    return None
+
+
 PROMPT_PATH = Path(__file__).parent / "alternate_feed_prompt.md"
 CONFIG_PATH = Path(__file__).parent / "config.json"
 HISTORY_PATH = Path(__file__).parent / "digest_history.json"
 NIM_KEY_STATE_PATH = Path(__file__).parent / "test_nim_key_state.json"
+DEBUG_LOG_PATH = Path(__file__).parent / "test_debug.log"
 NIM_KEY_ENV_NAMES = ["NVIDIA_API_KEY", "NIM_UNIFEED", "NVIDIA_API_KEY_2"]
+GRAMMAR_PROMPT_PATH = Path(__file__).parent / "grammar_checker.md"
 FIRST_RUN_STORY_COUNT = 10
 VALIDATE_CALL_PACING_SECONDS = 5
 VALIDATE_MAX_TOKENS = 6144
+# A grammar response is just corrected_text (~= input length) + a short corrections
+# list. Groq's free tier counts max_tokens against an 8000 TPM limit, so a large
+# reservation here starves the prompt and every call 413s. Keep this tight.
+GRAMMAR_CHECK_MAX_TOKENS = 3000
+GRAMMAR_CHECK_RETRIES = 3         # attempts per story before giving up and keeping the original
+GRAMMAR_RETRY_DELAY_SECONDS = 5   # pause between grammar-check retries for one story
+GRAMMAR_SOURCE_POSTS_MAX = 6      # source posts sent to the grammar model per story
+GRAMMAR_SOURCE_POST_CHARS = 600  # per source-post truncation for the grammar model
 RUN_LOG_CHANNEL = os.environ.get("RUN_LOG_TELEGRAM_CHANNEL", "@testzionism20")
 
 # --- Script Configuration ---
@@ -237,10 +294,30 @@ def wrap_with_divider(text: str) -> str:
 
 
 def _md_to_html(text: str) -> str:
-    """Convert **bold** markdown to Telegram HTML."""
-    text = html.escape(text)
-    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
-    return text
+    """Convert a small Markdown subset to Telegram HTML.
+
+    Supports **bold** and "> " line-prefixed quote blocks. Consecutive "> " lines
+    become a single <blockquote>. The quote block is used for claims relayed from
+    other (often hostile) media — see alternate_feed_prompt.md section 1A.
+    """
+    out: list[str] = []
+    quote: list[str] = []
+
+    def _flush_quote() -> None:
+        if quote:
+            out.append("<blockquote>" + "\n".join(html.escape(q) for q in quote) + "</blockquote>")
+            quote.clear()
+
+    for line in (text or "").split("\n"):
+        m = re.match(r'\s*>\s?(.*)$', line)
+        if m:
+            quote.append(m.group(1))
+        else:
+            _flush_quote()
+            out.append(html.escape(line))
+    _flush_quote()
+
+    return re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', "\n".join(out), flags=re.DOTALL)
 
 
 def log(msg: str, error: bool = False) -> None:
@@ -377,6 +454,168 @@ def save_history(
     }
     HISTORY_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     log(f"History saved to {HISTORY_PATH} ({len(full_history)} total stories: {added} new, {updates} updates, {len(processed_keys)} tracked post keys)")
+
+
+def write_debug_log(stories: list[dict], original_posts: list[dict]) -> None:
+    """Append a trace of each posted story and the source posts it was built from.
+
+    For every story that was actually posted to the channel this run, records the
+    Telegram message id + story text and, for each source index, the post key
+    (`channel_postid`) and the full original post text. Appends to test_debug.log so
+    the file accumulates across runs. A write failure is logged but never fatal.
+    """
+    posted = [s for s in stories if s.get("_post_success")]
+    if not posted:
+        return
+
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines: list[str] = []
+    for story in posted:
+        kind = "UPDATE" if story.get("history_index") is not None else "NEW"
+        lines.append("=" * 70)
+        lines.append(
+            f"[{ts}] story_id={story.get('telegram_message_id')} kind={kind} "
+            f"importance={story.get('importance')}"
+        )
+        lines.append("STORY CONTENT:")
+        lines.append((story.get("text") or "").strip())
+
+        source_indices = story.get("source_indices") or []
+        lines.append(f"SOURCE POSTS ({len(source_indices)}):")
+        for idx in source_indices:
+            if not (isinstance(idx, int) and 0 <= idx < len(original_posts)):
+                lines.append(f"  - source_index={idx} (out of range)")
+                continue
+            p = original_posts[idx]
+            lines.append(
+                f"  - post_id={_post_key(p)} channel={p.get('channel', '')} "
+                f"url={p.get('post_url', '')}"
+            )
+            body = _get_post_text(p).strip()
+            for body_line in (body.splitlines() or [""]):
+                lines.append(f"      {body_line}")
+        lines.append("")
+
+    try:
+        with DEBUG_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        log(
+            f"Debug trace for {len(posted)} posted "
+            f"stor{'y' if len(posted) == 1 else 'ies'} appended to {DEBUG_LOG_PATH}"
+        )
+    except OSError as e:
+        log(f"Could not write debug log: {e}", error=True)
+
+
+# --- Hostile-media-quote screening (see alternate_feed_prompt.md section 1A) ---
+# Signals that a *source post* is not first-hand reporting but a relay/translation
+# of what other (often hostile) media published.
+_HOSTILE_SOURCE_SIGNALS = (
+    "ערוצים פלסטינים", "ערוצים פלסטיניים", "תקשורת פלסטינית", "התקשורת הפלסטינית",
+    "מקורות פלסטינים", "מקורות פלסטיניים", "דיווחים פלסטינים",
+    "בתקשורת הערבית", "התקשורת הערבית", "תעמולה פלסטינית", "לפתוח רמקולים",
+)
+_ARABIC_CHAR = re.compile(r"[؀-ۿﭐ-﷿ﹰ-ﻼ]")
+# Phrases in the *story text* that mark a claim as attributed rather than stated as fact.
+_ATTRIBUTION_MARKERS = (
+    "תקשורת פלסטינית", "התקשורת הפלסטינית", "ערוצים פלסטינים", "ערוצים פלסטיניים",
+    "מקורות פלסטינים", "מקורות פלסטיניים", "לפי התקשורת", "לפי דיווחים", "על פי דיווחים",
+    "לפי גורמים פלסטינים", "בתקשורת הערבית", "התקשורת הערבית", "נטען", "לטענת",
+    "מציגה כ", "מציגים כ", "לפי הדיווח", "דווח כי",
+)
+# Framing that must never stand in the digest's own voice (only inside an attributed quote).
+_UNATTRIBUTED_RED_FLAGS = ("אלבראק", "אל-בוראק", "אל בוראק", "אל־בוראק")
+
+
+def _is_hostile_media_quote(post_text: str) -> bool:
+    """True if a raw source post merely relays/translates another outlet's report."""
+    if any(sig in post_text for sig in _HOSTILE_SOURCE_SIGNALS):
+        return True
+    has_translation_label = "תרגום" in post_text or "תירגום" in post_text
+    return has_translation_label and len(_ARABIC_CHAR.findall(post_text)) >= 15
+
+
+def _first_line(text: str) -> str:
+    stripped = (text or "").strip()
+    return stripped.splitlines()[0] if stripped else ""
+
+
+def screen_hostile_framing(stories: list[dict], original_posts: list[dict]) -> list[dict]:
+    """Hold stories that reproduce hostile-media framing without attribution.
+
+    Enforces alternate_feed_prompt.md section 1A: when a story is built from a post
+    that only quotes/translates other media, the story's bold subject line MUST
+    attribute the claim. Stories that fail are dropped from this run (not posted,
+    not saved to history) and recorded in test_debug.log for manual review.
+    Returns the filtered list of stories cleared to proceed.
+    """
+    cleared: list[dict] = []
+    held: list[tuple[dict, str]] = []
+    for story in stories:
+        text = story.get("text") or ""
+        bold = _first_line(text)
+        attributed_in_bold = any(m in bold for m in _ATTRIBUTION_MARKERS)
+        attributed_anywhere = any(m in text for m in _ATTRIBUTION_MARKERS)
+
+        src_texts = [
+            _get_post_text(original_posts[i])
+            for i in (story.get("source_indices") or [])
+            if isinstance(i, int) and 0 <= i < len(original_posts)
+        ]
+        from_hostile_quote = any(_is_hostile_media_quote(t) for t in src_texts)
+
+        reason = ""
+        if from_hostile_quote and not attributed_in_bold:
+            reason = ("source post relays hostile media, but the story's bold line "
+                      "does not attribute the claim (section 1A step 1)")
+        elif any(flag in text for flag in _UNATTRIBUTED_RED_FLAGS) and not attributed_anywhere:
+            reason = "story uses hostile framing (\"אלבראק\") with no attribution anywhere in the text"
+
+        if reason:
+            held.append((story, reason))
+        else:
+            cleared.append(story)
+
+    if held:
+        for story, reason in held:
+            log(f"  [HOSTILE-FRAMING HOLD] {reason}: {_story_preview(story)!r}", error=True)
+        _write_hostile_framing_review(held, original_posts)
+        log(
+            f"Held {len(held)} stor{'y' if len(held) == 1 else 'ies'} from posting for "
+            f"hostile-framing review (see {DEBUG_LOG_PATH}); {len(cleared)} cleared."
+        )
+    return cleared
+
+
+def _write_hostile_framing_review(held: list[tuple[dict, str]], original_posts: list[dict]) -> None:
+    """Append held stories + their source posts to test_debug.log for manual review."""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = ["", "#" * 70,
+             f"[{ts}] HOSTILE-FRAMING REVIEW — {len(held)} story(ies) held from posting"]
+    for story, reason in held:
+        lines.append("-" * 70)
+        lines.append(f"REASON: {reason}")
+        lines.append("STORY CONTENT:")
+        lines.append((story.get("text") or "").strip())
+        src = story.get("source_indices") or []
+        lines.append(f"SOURCE POSTS ({len(src)}):")
+        for idx in src:
+            if not (isinstance(idx, int) and 0 <= idx < len(original_posts)):
+                lines.append(f"  - source_index={idx} (out of range)")
+                continue
+            p = original_posts[idx]
+            lines.append(
+                f"  - post_id={_post_key(p)} channel={p.get('channel', '')} "
+                f"url={p.get('post_url', '')}"
+            )
+            for body_line in (_get_post_text(p).strip().splitlines() or [""]):
+                lines.append(f"      {body_line}")
+        lines.append("")
+    try:
+        with DEBUG_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+    except OSError as e:
+        log(f"Could not write hostile-framing review log: {e}", error=True)
 
 
 def login(base_url: str, username: str, password: str) -> str:
@@ -723,6 +962,160 @@ def validate_story_candidate(
         "additional_info": additional_info,
         "reason": reason,
     }
+
+
+def _grammar_source_refs(story: dict, source_posts: list[dict] | None) -> list[str]:
+    """Collect read-only raw source-post texts for one story's grammar check.
+
+    Uses ``story["source_indices"]`` to index into ``source_posts`` (the same list
+    order ``resolve_media_urls`` relies on). Returns an ordered, de-duplicated,
+    truncated list; empty when there is nothing usable.
+    """
+    if not source_posts:
+        return []
+    refs: list[str] = []
+    seen: set[str] = set()
+    for idx in story.get("source_indices", []) or []:
+        if not isinstance(idx, int) or not (0 <= idx < len(source_posts)):
+            continue
+        text = (source_posts[idx].get("text_plain") or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        refs.append(text[:GRAMMAR_SOURCE_POST_CHARS])
+        if len(refs) >= GRAMMAR_SOURCE_POSTS_MAX:
+            break
+    return refs
+
+
+def _grammar_call_once(provider: "AIProvider", prompt: str, payload: dict) -> dict:
+    """Run one grammar-model call and return the parsed result dict.
+
+    Raises ``ProviderRequestError`` (provider failure) or ``ValueError`` (missing /
+    unparseable / empty response). The caller treats both as retryable.
+    """
+    content = provider.chat_json(
+        prompt,
+        json.dumps(payload, ensure_ascii=False),
+        temperature=0.0,
+        timeout=900.0,
+        max_tokens=GRAMMAR_CHECK_MAX_TOKENS,
+    )
+    content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        result = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"response was not valid JSON ({exc})") from exc
+    if not isinstance(result, dict) or not str(result.get("corrected_text", "")).strip():
+        raise ValueError("no corrected_text in response")
+    return result
+
+
+def grammar_check_stories(
+    stories: list[dict], config: dict, source_posts: list[dict] | None = None
+) -> None:
+    """Run a Hebrew grammar/language-correction model pass over each story's text.
+
+    For every story about to be posted (new stories and update fragments alike) the
+    configured grammar model:
+      1. keeps the text Hebrew-only (foreign proper nouns excepted) and translates any
+         other non-Hebrew wording,
+      2. fixes gender agreement (זכר/נקבה),
+      3. fixes Hebrew grammar, punctuation and awkward phrasing,
+      4. fixes missing/garbled verbs and bold-line/body mismatches, using the raw
+         source posts (when ``source_posts`` is given) as read-only reference.
+
+    Every applied correction is logged (original -> corrected). The pass is best
+    effort: a missing prompt file or an unknown provider skips the whole pass. A
+    per-story failure (provider error, unparseable or empty response) is retried up
+    to ``GRAMMAR_CHECK_RETRIES`` times; if every attempt fails the original text is
+    kept and the run moves on to the next story. Mutates ``story["text"]`` in place.
+    ``source_posts`` is optional; when omitted the model receives only
+    ``{"text": ...}`` exactly as before.
+    """
+    if not stories:
+        return
+
+    provider = build_grammar_provider(config)
+    if provider is None:
+        return
+
+    try:
+        prompt = GRAMMAR_PROMPT_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        log(f"Grammar check skipped: prompt file not found at {GRAMMAR_PROMPT_PATH}", error=True)
+        return
+
+    log(
+        f"Running grammar/language check on {len(stories)} "
+        f"stor{'y' if len(stories) == 1 else 'ies'} via "
+        f"{type(provider).__name__} ({provider.model})..."
+    )
+
+    total_corrections = 0
+    checked = 0
+    for rank, story in enumerate(stories, start=1):
+        original = story.get("text", "")
+        if not original.strip():
+            continue
+        if checked > 0:
+            time.sleep(VALIDATE_CALL_PACING_SECONDS)
+        checked += 1
+
+        refs = _grammar_source_refs(story, source_posts)
+        payload: dict = {"text": original}
+        if refs:
+            payload["source_posts"] = refs
+
+        result: dict | None = None
+        for attempt in range(1, GRAMMAR_CHECK_RETRIES + 1):
+            try:
+                result = _grammar_call_once(provider, prompt, payload)
+                break
+            except (ProviderRequestError, ValueError) as exc:
+                if attempt < GRAMMAR_CHECK_RETRIES:
+                    log(
+                        f"  [GRAMMAR rank={rank}] attempt {attempt}/{GRAMMAR_CHECK_RETRIES} "
+                        f"failed: {exc}. Retrying in {GRAMMAR_RETRY_DELAY_SECONDS}s...",
+                        error=True,
+                    )
+                    time.sleep(GRAMMAR_RETRY_DELAY_SECONDS)
+                else:
+                    log(
+                        f"  [GRAMMAR rank={rank}] all {GRAMMAR_CHECK_RETRIES} attempts "
+                        f"failed: {exc}. Keeping original text, moving to next story.",
+                        error=True,
+                    )
+        if result is None:
+            continue
+
+        corrected = str(result.get("corrected_text", "")).strip()
+        corrections = result.get("corrections") or []
+        if corrected == original:
+            log(f"  [GRAMMAR rank={rank}] no changes needed.")
+            continue
+
+        applied = 0
+        for item in corrections:
+            if not isinstance(item, dict):
+                continue
+            applied += 1
+            log(
+                f"  [GRAMMAR-FIX rank={rank}] ({item.get('issue', '')}) "
+                f"{item.get('original', '')!r} -> {item.get('corrected', '')!r}"
+            )
+        total_corrections += applied
+        log(
+            f"  [GRAMMAR rank={rank}] text updated ({applied} correction(s)).\n"
+            f"    BEFORE: {original[:200]!r}\n"
+            f"    AFTER:  {corrected[:200]!r}"
+        )
+        story["text"] = corrected
+
+    log(
+        f"Grammar/language check complete: {total_corrections} correction(s) applied "
+        f"across {checked} stor{'y' if checked == 1 else 'ies'}."
+    )
 
 
 def _abs_url(url: str, base_url: str) -> str | None:
@@ -1521,6 +1914,9 @@ async def main():
         f"Validation complete: {valid_new_count} ranked new candidate(s), "
         f"{update_count} update(s); updates do not count toward target={max_stories}."
     )
+    grammar_check_stories(stories, config, new_posts)
+    if config.get("hostile_framing_screen_enabled", True):
+        stories = screen_hostile_framing(stories, new_posts)
     stories = resolve_media_urls(stories, new_posts, base_url)
 
     tg_channel = os.environ.get("TEST_DIGEST_TELEGRAM_CHANNEL" if args.test else "DIGEST_TELEGRAM_CHANNEL", "")
@@ -1569,6 +1965,8 @@ async def main():
         posted_media_hashes,
         processed_post_texts,
     )
+
+    write_debug_log(stories, new_posts)
 
     posted_new_count = sum(
         s.get("history_index") is None and s.get("_post_success") for s in stories
