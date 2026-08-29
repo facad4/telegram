@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from telethon import TelegramClient, Button, functions
 from telethon.sessions import StringSession
-from perplexity_marker import PX_BUTTON_LABEL, TOC_BUTTON_LABEL, toc_page_url, toc_miniapp_url
+from perplexity_marker import PX_BUTTON_LABEL, TOC_BUTTON_LABEL, toc_page_url
 from telethon.tl.types import Channel, Chat, MessageMediaPhoto, MessageMediaDocument, PeerChannel, DocumentAttributeVideo
 from google import genai
 from google.genai import types
@@ -90,17 +90,12 @@ async def lifespan(app: FastAPI):
 
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     app.state.bot = None
-    app.state.bot_username = None
     if bot_token and api_id and api_hash:
         try:
             bot = TelegramClient(StringSession(), int(api_id), api_hash)
             await bot.start(bot_token=bot_token)
             app.state.bot = bot
-            try:
-                app.state.bot_username = (await bot.get_me()).username
-            except Exception as e:
-                logger.warning("Could not resolve bot username: %s", e)
-            logger.info("Telegram bot client connected (@%s)", app.state.bot_username)
+            logger.info("Telegram bot client connected")
         except Exception as e:
             logger.warning("Telegram bot client failed to initialize: %s", e)
 
@@ -836,43 +831,24 @@ def _toc_channel_ref(ch: str) -> int | str | None:
     return int(raw) if raw.lstrip("-").isdigit() else raw
 
 
-def _toc_headlines_url(target: str, bot_username: str | None) -> str | None:
-    """URL for the "today's headlines" inline button.
-
-    Prefers a Direct Link Mini App (``t.me/<bot>/<app>``) which opens natively inside
-    Telegram with no browser chrome; falls back to the raw ``/digest/today`` page URL
-    (opens in Telegram's in-app browser) when the bot username or app short name is
-    unknown. Returns None when neither can be produced.
-    """
-    ch = "test" if target == "test" else "prod"
-    username = bot_username or os.environ.get("DIGEST_TOC_BOT_USERNAME", "")
-    app_short = os.environ.get("DIGEST_TOC_APP", "")
-    if username and app_short:
-        return toc_miniapp_url(username, app_short, ch)
-    base = os.environ.get("DIGEST_TOC_PUBLIC_URL") or os.environ.get("DIGEST_SERVER_URL", "")
-    key = os.environ.get("DIGEST_TOC_KEY", "")
-    if base and key:
-        return toc_page_url(base, ch, key)
-    return None
-
-
 def _toc_button_rows(bot: TelegramClient | None, target: str,
-                     include_px: bool = True,
-                     bot_username: str | None = None) -> list | None:
+                     include_px: bool = True) -> list | None:
     """Inline-keyboard rows for a digest channel post: Perplexity + today's headlines.
 
     Returns None when no bot client is available (a user account cannot attach
-    inline keyboards). The headlines row is added only when a headlines URL can be
-    built (see ``_toc_headlines_url``).
+    inline keyboards). The headlines row is added only when DIGEST_SERVER_URL and
+    DIGEST_TOC_KEY are both set.
     """
     if bot is None:
         return None
     row: list = []
     if include_px:
         row.append(Button.inline(PX_BUTTON_LABEL, b"px"))
-    url = _toc_headlines_url(target, bot_username)
-    if url:
-        row.append(Button.url(TOC_BUTTON_LABEL, url))
+    base = os.environ.get("DIGEST_SERVER_URL", "")
+    key = os.environ.get("DIGEST_TOC_KEY", "")
+    if base and key:
+        ch = "test" if target == "test" else "prod"
+        row.append(Button.url(TOC_BUTTON_LABEL, toc_page_url(base, ch, key)))
     return [row] if row else None
 
 
@@ -918,28 +894,23 @@ def _render_toc_page(channel_title: str, rows_html: str, message: str = "") -> s
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>הכותרות של היום</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-  :root {{ color-scheme: light dark; }}
+  :root {{ color-scheme: dark; }}
   * {{ box-sizing: border-box; }}
-  body {{ margin: 0;
-         background: var(--tg-theme-bg-color, #0e1117);
-         color: var(--tg-theme-text-color, #e8eaed);
+  body {{ margin: 0; background: #0e1117; color: #e8eaed;
          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
          line-height: 1.6; }}
   .wrap {{ max-width: 800px; margin: 0 auto; padding: 20px 16px 48px; }}
   h1 {{ font-size: 1.3rem; margin: 0 0 4px; }}
-  .date {{ color: var(--tg-theme-hint-color, #9aa0a6); font-size: .9rem; margin-bottom: 20px; }}
+  .date {{ color: #9aa0a6; font-size: .9rem; margin-bottom: 20px; }}
   ul {{ list-style: none; margin: 0; padding: 0; }}
-  li {{ padding: 14px 0;
-        border-bottom: 1px solid var(--tg-theme-section-separator-color, #2d3240);
+  li {{ padding: 14px 0; border-bottom: 1px solid #2d3240;
         display: flex; gap: 12px; align-items: baseline; justify-content: space-between; }}
-  li a {{ color: var(--tg-theme-text-color, #e8eaed); text-decoration: none;
-          font-size: 1.05rem; flex: 1; }}
-  li a:hover {{ color: var(--tg-theme-link-color, #2196f3); }}
-  .meta {{ color: var(--tg-theme-hint-color, #9aa0a6); font-size: .8rem; white-space: nowrap; }}
-  .tag {{ color: var(--tg-theme-link-color, #2196f3); margin-inline-end: 8px; }}
-  .note {{ color: var(--tg-theme-hint-color, #9aa0a6); }}
+  li a {{ color: #e8eaed; text-decoration: none; font-size: 1.05rem; flex: 1; }}
+  li a:hover {{ color: #2196f3; }}
+  .meta {{ color: #9aa0a6; font-size: .8rem; white-space: nowrap; }}
+  .tag {{ color: #2196f3; margin-inline-end: 8px; }}
+  .note {{ color: #9aa0a6; }}
 </style>
 </head>
 <body>
@@ -949,9 +920,6 @@ def _render_toc_page(channel_title: str, rows_html: str, message: str = "") -> s
   {body_list}
   {note}
 </div>
-<script>
-  try {{ Telegram.WebApp.ready(); Telegram.WebApp.expand(); }} catch (e) {{}}
-</script>
 </body>
 </html>"""
 
@@ -964,10 +932,7 @@ async def digest_today(request: Request):
     if not key or not supplied or not secrets.compare_digest(supplied, key):
         raise HTTPException(status_code=404, detail="Not Found")
 
-    # ``ch`` may arrive as an explicit query param (raw-URL fallback) or as the Mini App
-    # start parameter (``t.me/<bot>/<app>?startapp=<ch>`` -> ``tgWebAppStartParam``).
-    ch_raw = request.query_params.get("ch") or request.query_params.get("tgWebAppStartParam")
-    ch = "test" if ch_raw == "test" else "prod"
+    ch = "test" if request.query_params.get("ch") == "test" else "prod"
     resp_headers = {
         "X-Robots-Tag": "noindex, nofollow",
         "Cache-Control": "private, no-store",
@@ -1613,7 +1578,7 @@ async def compose_to_channel(request: Request, user: dict = Depends(require_auth
     sender = bot or tg
     if not sender:
         raise HTTPException(status_code=503, detail="Telegram client not available")
-    buttons = _toc_button_rows(bot, target, bot_username=request.app.state.bot_username)
+    buttons = _toc_button_rows(bot, target)
     try:
         entity = await sender.get_entity(int(channel) if channel.lstrip("-").isdigit() else channel)
         await sender.send_message(entity, text, link_preview=True, buttons=buttons)
@@ -1658,8 +1623,7 @@ async def upload_image_to_channel(
     buf = io.BytesIO(data)
     buf.name = image.filename or "upload.jpg"
     has_caption = bool(caption.strip())
-    buttons = _toc_button_rows(bot, target, include_px=has_caption,
-                              bot_username=request.app.state.bot_username)
+    buttons = _toc_button_rows(bot, target, include_px=has_caption)
     try:
         entity = await sender.get_entity(int(channel) if channel.lstrip("-").isdigit() else channel)
         await sender.send_file(

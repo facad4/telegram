@@ -8,7 +8,7 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - **Database**: Supabase (PostgreSQL) via async Python SDK, encapsulated in `database.py`
 - **Frontend**: Single-page vanilla HTML/CSS/JavaScript application (`static/index.html`) with auto-scrolling tiles
 - **Configuration**: `config.json` for global settings; per-user channel feeds stored in Supabase `Feeds` table
-- **Environment**: `.env` file for secrets (`SUPABASE_URL`, `SUPABASE_KEY`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION`, `GROK_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, `TAVILY_API_KEY`, `NVIDIA_API_KEY`, `NIM_UNIFEED`, `OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`, `DIGEST_TOC_KEY`, `DIGEST_TODAY_TZ`, `DIGEST_TOC_BOT_USERNAME`, `DIGEST_TOC_APP`, `DIGEST_TOC_PUBLIC_URL`) loaded via `python-dotenv`. `DIGEST_TOC_KEY` is the secret token gating `GET /digest/today` (also required on the digest host to build the fallback button URL); `DIGEST_TODAY_TZ` sets the "today" boundary for that page (default `Asia/Jerusalem`). `DIGEST_TOC_BOT_USERNAME` + `DIGEST_TOC_APP` name the Direct Link Mini App (`t.me/<bot>/<app>`) the "הכותרות של היום" button opens natively (see Perplexity/enrichment area); `DIGEST_TOC_PUBLIC_URL` is the public HTTPS origin used only for the raw-URL fallback when the Mini App is not configured (kept separate from `DIGEST_SERVER_URL`, which stays the LAN/dev address for the digest pipeline).
+- **Environment**: `.env` file for secrets (`SUPABASE_URL`, `SUPABASE_KEY`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION`, `GROK_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, `TAVILY_API_KEY`, `NVIDIA_API_KEY`, `NIM_UNIFEED`, `OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`, `DIGEST_TOC_KEY`, `DIGEST_TODAY_TZ`) loaded via `python-dotenv`. `DIGEST_TOC_KEY` is the secret token gating `GET /digest/today` (also required on the digest host to build the button URL); `DIGEST_TODAY_TZ` sets the "today" boundary for that page (default `Asia/Jerusalem`).
 - **Dependencies**: FastAPI, httpx, BeautifulSoup4, supabase, python-dotenv, telethon, google-genai, pyjwt, tavily-python, playwright, tzdata (see `requirements.txt`). `perplexity_browser.py` additionally requires Windows-only packages (`pyautogui`, `pyperclip`, `pywin32`) that are not listed in `requirements.txt`.
 - **Enrichment listener**: `perplexity_listener.py` runs as a separate long-lived process (bot) and is not part of the web server
 
@@ -329,7 +329,7 @@ Uploads an image file to a configured Telegram channel via the bot or user clien
 - 503: Required channel env var not configured, or no Telegram client available
 - 500: Telegram send failure
 
-**Implementation**: Prefers the bot client (`app.state.bot`) so the inline buttons can be attached; falls back to the user client (`app.state.telegram`) if no bot is configured. When a bot client is available, the "הכותרות של היום" URL button is also attached (independent of whether a caption is present) via `_toc_button_rows()` → `_toc_headlines_url()`, which prefers a Direct Link Mini App (`t.me/<DIGEST_TOC_BOT_USERNAME>/<DIGEST_TOC_APP>?startapp=<test|prod>`) and falls back to the raw `GET /digest/today` page URL (`DIGEST_TOC_PUBLIC_URL` or `DIGEST_SERVER_URL` + `DIGEST_TOC_KEY`).
+**Implementation**: Prefers the bot client (`app.state.bot`) so the inline buttons can be attached; falls back to the user client (`app.state.telegram`) if no bot is configured. When a bot client is available, the "הכותרות של היום" URL button (→ `GET /digest/today?ch=<target>`) is also attached (independent of whether a caption is present, provided `DIGEST_SERVER_URL` + `DIGEST_TOC_KEY` are set) via `_toc_button_rows()`.
 
 #### `POST /api/admin/compose-to-channel` (protected, admin-only)
 Composes and sends a free-text message to a configured Telegram channel via the bot or user client. Used by the admin "Post to Channel" composer in the management panel.
@@ -352,7 +352,7 @@ Composes and sends a free-text message to a configured Telegram channel via the 
 - 503: Required channel env var not configured, or no Telegram client available
 - 500: Telegram send failure
 
-**Implementation**: Prefers the bot client (`app.state.bot`); when a bot is available, two inline buttons are attached via `_toc_button_rows()` — the Perplexity button (`PX_BUTTON_LABEL`, "ספר לי עוד על זה") and the "הכותרות של היום" button (Direct Link Mini App `t.me/<DIGEST_TOC_BOT_USERNAME>/<DIGEST_TOC_APP>?startapp=<target>`, or the raw `GET /digest/today` URL as fallback — see `_toc_headlines_url()`). Falls back to the user client if no bot is configured.
+**Implementation**: Prefers the bot client (`app.state.bot`); when a bot is available, two inline buttons are attached via `_toc_button_rows()` — the Perplexity button (`PX_BUTTON_LABEL`, "ספר לי עוד על זה") and the "הכותרות של היום" URL button (→ `GET /digest/today?ch=<target>`, added when `DIGEST_SERVER_URL` + `DIGEST_TOC_KEY` are set). Falls back to the user client if no bot is configured.
 
 #### `POST /api/top-posts` (protected)
 Sends the user's current feed posts to a configurable AI provider (Google Gemini, Mistral, or Groq) for importance ranking, returns the top 10.
@@ -628,11 +628,10 @@ Tracks share actions for analytics and logging purposes.
 **Implementation**: Frontend calls this endpoint when users share posts via native share or custom share popup (WhatsApp, Telegram, Email, Copy). Logs include username, share method, and post URL.
 
 #### `GET /digest/today` (secret-token gated)
-Public HTML page listing every headline posted **today** (calendar day, `DIGEST_TODAY_TZ`, default `Asia/Jerusalem`) to a digest channel, each linking straight to its message. Opened by the "הכותרות של היום" inline button attached to digest channel posts (see Perplexity/enrichment area) — normally as a **Telegram Mini App** (native, no in-app-browser chrome), falling back to a plain in-app-browser page when the Mini App is not configured.
+Public HTML page listing every headline posted **today** (calendar day, `DIGEST_TODAY_TZ`, default `Asia/Jerusalem`) to a digest channel, each linking straight to its message. Opened by the "הכותרות של היום" inline URL button attached to digest channel posts (see Perplexity/enrichment area).
 
-- **Mini App rendering**: the page loads `https://telegram.org/js/telegram-web-app.js` and calls `Telegram.WebApp.ready()` / `expand()`; its palette uses Telegram theme variables (`--tg-theme-*`) with the dark defaults as fallback, so it also renders fine as a standalone web page. Requires the page be served over **public HTTPS** (Telegram Mini App constraint) — configured as the bot's Web App URL in BotFather (`https://<public-host>/digest/today?k=<DIGEST_TOC_KEY>`).
-- **Auth**: no JWT (a URL button carries no `Authorization` header). Instead a capability token: query param `k` must match env `DIGEST_TOC_KEY` (constant-time compare). For the Mini App the `k` is baked into the BotFather-registered Web App URL. Missing env var or wrong/absent `k` → **404**. Responses carry `X-Robots-Tag: noindex, nofollow` and `Cache-Control: private, no-store`.
-- **Query**: channel selector read from `ch` **or** `tgWebAppStartParam` (Mini App `?startapp=` value) — `test` → `TEST_DIGEST_TELEGRAM_CHANNEL`; `prod` (or absent) → `DIGEST_TELEGRAM_CHANNEL`.
+- **Auth**: no JWT (a URL button carries no `Authorization` header). Instead a capability token: query param `k` must match env `DIGEST_TOC_KEY` (constant-time compare). Missing env var or wrong/absent `k` → **404**. Responses carry `X-Robots-Tag: noindex, nofollow` and `Cache-Control: private, no-store`.
+- **Query**: `ch=test` → `TEST_DIGEST_TELEGRAM_CHANNEL`; `ch=prod` (or absent) → `DIGEST_TELEGRAM_CHANNEL`.
 - **Data**: live read of the channel via the Telethon user client (`fetch_channel_posts_telethon`, same as `/api/channel-posts`) — so it covers digest stories, updates, *and* admin-posted messages. Media-only messages and digest run-log attachments (`Run log — …`) are skipped; the headline is the first meaningful line (bold markers stripped, a leading `עדכון` marker flags an update row), truncated to ~100 chars. Newest first.
 - **Cache**: rendered HTML cached in-process per channel for 120 s.
 - **Degradation**: if the Telethon client or channel env var is unavailable, renders a styled "not available" page (never a stack trace).
@@ -1312,17 +1311,10 @@ Shared constants used across the server, digest script, and listener:
 - `PX_MARKER`: HTML comment (`<!-- PX_BLOCKQUOTE_START -->`) delimiting the original story text from the appended enrichment blockquote, so the listener can strip a prior enrichment before regenerating
 - `PX_BUTTON_LABEL`: the inline button caption (`"ספר לי עוד על זה"`)
 - `TOC_BUTTON_LABEL`: caption for the second inline button (`"הכותרות של היום"`) that opens the today's-headlines page
-- `toc_page_url(server_base, ch, key)`: builds `"<server>/digest/today?ch=<test|prod>&k=<DIGEST_TOC_KEY>"` (adds `https://` if `server_base` has no scheme) — the **fallback** URL form
-- `toc_miniapp_url(bot_username, app_short_name, ch)`: builds `"https://t.me/<bot>/<app>?startapp=<test|prod>"` — the Direct Link Mini App form; a plain inline URL button with this value opens the page natively inside Telegram (no browser chrome), and the page receives `ch` as `tgWebAppStartParam`
+- `toc_page_url(server_base, ch, key)`: builds `"<server>/digest/today?ch=<test|prod>&k=<DIGEST_TOC_KEY>"` (adds `https://` if `server_base` has no scheme)
 
 #### "הכותרות של היום" button (today's headlines)
-A second inline URL button attached alongside the Perplexity button on every bot-sent digest channel post (`test_generate_alternate_digest.py`, `POST /api/admin/compose-to-channel`, `POST /api/admin/upload-image-to-channel`). It opens the today's-headlines list (`GET /digest/today`, see API Endpoints) — a scrollable RTL list of today's headlines that deep-link back into the channel. Nothing is posted to the channel when tapped.
-
-**Preferred form — Telegram Mini App**: when `DIGEST_TOC_BOT_USERNAME` + `DIGEST_TOC_APP` are set, the button URL is `toc_miniapp_url(...)` (`t.me/<bot>/<app>?startapp=<test|prod>`) and Telegram opens the page in the native Mini App container (title bar + close only, no address bar). One-time setup: in **BotFather** run `/newapp` on the bot, set the **Web App URL** to `https://<public-host>/digest/today?k=<DIGEST_TOC_KEY>` (public HTTPS required) and the **short name** to match `DIGEST_TOC_APP`. `web_app`-type inline buttons can't be used here (Telegram allows them only in private chats with the bot), which is why the Direct Link form is used.
-
-**Fallback form — raw page URL**: when the Mini App env vars are absent, the button falls back to `toc_page_url(DIGEST_TOC_PUBLIC_URL or DIGEST_SERVER_URL, ch, key)`, which opens `GET /digest/today` in Telegram's in-app browser. `DIGEST_TOC_PUBLIC_URL` is kept separate from `DIGEST_SERVER_URL` so the latter can stay a LAN/dev address for the digest pipeline. The button is omitted entirely only when neither form can produce a URL.
-
-`generate_alternate_digest.py` (production copy) is intentionally left unchanged; the Mini App wiring lives in `test_generate_alternate_digest.py` (`resolve_toc_url()`) and `server.py` (`_toc_headlines_url()`).
+A second inline URL button attached alongside the Perplexity button on every bot-sent digest channel post (`test_generate_alternate_digest.py`, `POST /api/admin/compose-to-channel`, `POST /api/admin/upload-image-to-channel`). It opens `GET /digest/today` (see API Endpoints) in Telegram's in-app browser — a scrollable RTL list of today's headlines that deep-link back into the channel. Nothing is posted to the channel when tapped. The button is added only when the bot client is available **and** `DIGEST_SERVER_URL` + `DIGEST_TOC_KEY` are both set (the same `DIGEST_TOC_KEY` value must be configured on the server and on the digest host). `generate_alternate_digest.py` (production copy) is intentionally left unchanged.
 
 #### `perplexity_listener.py`
 A long-running Telethon **bot** listener (run separately via systemd / Task Scheduler / NSSM) that handles inline button taps:
@@ -1517,7 +1509,7 @@ Windows-only enrichment backend that drives a real **Brave** browser via OS auto
 ├── context_summary_prompt.md  # System prompt for Gemini context search with Google Search grounding
 ├── search_terms.md        # Prompt for Mistral AI to extract search terms from posts
 ├── summarize.md           # Prompt for Mistral AI to summarize web search results
-├── perplexity_marker.py   # Shared PX_MARKER / PX_BUTTON_LABEL / TOC_BUTTON_LABEL / toc_page_url() / toc_miniapp_url() for the inline buttons
+├── perplexity_marker.py   # Shared PX_MARKER / PX_BUTTON_LABEL / TOC_BUTTON_LABEL / toc_page_url() for the inline buttons
 ├── perplexity_listener.py # Long-running Telethon bot listener that enriches posts on inline-button taps (Mistral + Tavily)
 ├── perplexity_search.py   # PerplexitySearch: query perplexity.ai via headless Playwright browser
 ├── perplexity_browser.py  # PerplexityBrowser: Windows OS-automation enrichment via Brave + clipboard
@@ -1530,7 +1522,7 @@ Windows-only enrichment backend that drives a real **Brave** browser via OS auto
 ├── test_nim_key_state.json  # Tracks last-used NIM API key index for rotation between NVIDIA_API_KEY/NIM_UNIFEED (created/updated by generate_alternate_digest.py)
 ├── avatar_cache/          # On-disk cache of Telethon channel avatars (JPEG, created at runtime)
 ├── thumb_cache/           # On-disk cache of Telethon post thumbnails (JPEG, created at runtime)
-├── .env                   # Environment variables (SUPABASE_URL, SUPABASE_KEY, TELEGRAM_*, GROK_API_KEY, GOOGLE_API_KEY, MISTRAL_API_KEY, NVIDIA_API_KEY, OPENROUTER_API_KEY, TAVILY_API_KEY, TELEGRAM_BOT_TOKEN, DIGEST_SERVER_URL, DIGEST_USERNAME, DIGEST_PASSWORD, DIGEST_TELEGRAM_CHANNEL, TEST_DIGEST_TELEGRAM_CHANNEL, DIGEST_TOC_KEY, DIGEST_TODAY_TZ, DIGEST_TOC_BOT_USERNAME, DIGEST_TOC_APP, DIGEST_TOC_PUBLIC_URL, PX_MAX_CONCURRENCY, PX_COOLDOWN_S)
+├── .env                   # Environment variables (SUPABASE_URL, SUPABASE_KEY, TELEGRAM_*, GROK_API_KEY, GOOGLE_API_KEY, MISTRAL_API_KEY, NVIDIA_API_KEY, OPENROUTER_API_KEY, TAVILY_API_KEY, TELEGRAM_BOT_TOKEN, DIGEST_SERVER_URL, DIGEST_USERNAME, DIGEST_PASSWORD, DIGEST_TELEGRAM_CHANNEL, TEST_DIGEST_TELEGRAM_CHANNEL, DIGEST_TOC_KEY, DIGEST_TODAY_TZ, PX_MAX_CONCURRENCY, PX_COOLDOWN_S)
 ├── requirements.txt       # Python dependencies
 ├── static/
 │   ├── index.html         # Complete frontend application with PWA and share system

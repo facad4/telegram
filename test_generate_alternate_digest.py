@@ -35,12 +35,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from telethon import TelegramClient, Button
 from telethon.sessions import StringSession
-from perplexity_marker import (
-    PX_BUTTON_LABEL,
-    TOC_BUTTON_LABEL,
-    toc_page_url,
-    toc_miniapp_url,
-)
+from perplexity_marker import PX_BUTTON_LABEL, TOC_BUTTON_LABEL, toc_page_url
 
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -1327,32 +1322,6 @@ async def connect_telegram_bot() -> TelegramClient | None:
         return None
 
 
-async def resolve_toc_url(ch: str, base_url: str) -> str | None:
-    """URL for the "today's headlines" inline button.
-
-    Prefers a Direct Link Mini App (``t.me/<bot>/<app>``) that opens natively inside
-    Telegram with no browser chrome; falls back to the raw ``/digest/today`` page URL
-    (``DIGEST_TOC_PUBLIC_URL`` if set, else ``base_url``) when the bot username or the
-    Mini App short name is unknown. ``ch`` is ``"test"`` or ``"prod"``.
-    """
-    username = os.environ.get("DIGEST_TOC_BOT_USERNAME", "")
-    app_short = os.environ.get("DIGEST_TOC_APP", "")
-    if not username:
-        bot_client = await connect_telegram_bot()
-        if bot_client is not None:
-            try:
-                username = (await bot_client.get_me()).username or ""
-            except Exception:
-                username = ""
-    if username and app_short:
-        return toc_miniapp_url(username, app_short, ch)
-    key = os.environ.get("DIGEST_TOC_KEY", "")
-    page_base = os.environ.get("DIGEST_TOC_PUBLIC_URL") or base_url
-    if page_base and key:
-        return toc_page_url(page_base, ch, key)
-    return None
-
-
 async def disconnect_telegram_clients() -> None:
     """Disconnect any Telegram clients that were connected/cached during this run."""
     global _shared_user_client, _shared_bot_client, _bot_client_attempted
@@ -1830,7 +1799,8 @@ async def main():
         if tg_channel.lstrip("-").isdigit():
             tg_channel = int(tg_channel)
         log(f"Posting single story to Telegram channel {tg_channel}...")
-        _toc_url = await resolve_toc_url("test", base_url)
+        _toc_key = os.environ.get("DIGEST_TOC_KEY", "")
+        _toc_url = toc_page_url(base_url, "test", _toc_key) if (base_url and _toc_key) else None
         await post_stories_to_telegram(single_stories, tg_channel, set(), toc_url=_toc_url)
         return
 
@@ -1991,8 +1961,9 @@ async def main():
         else:
             log("Video support disabled; skipping video resolution.")
         log(f"Posting {len(stories)} stories to Telegram channel {tg_channel}...")
+        _toc_key = os.environ.get("DIGEST_TOC_KEY", "")
         _toc_ch = "test" if args.test else "prod"
-        _toc_url = await resolve_toc_url(_toc_ch, base_url)
+        _toc_url = toc_page_url(base_url, _toc_ch, _toc_key) if (base_url and _toc_key) else None
         posted_media_hashes = await post_stories_to_telegram(
             stories,
             tg_channel,

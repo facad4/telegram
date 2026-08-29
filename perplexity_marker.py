@@ -16,17 +16,3 @@ def toc_page_url(server_base: str, ch: str, key: str) -> str:
     if not base.startswith(("http://", "https://")):
         base = "https://" + base
     return f"{base}/digest/today?ch={ch}&k={key}"
-
-
-def toc_miniapp_url(bot_username: str, app_short_name: str, ch: str) -> str:
-    """Direct Link Mini App URL for the today's-headlines page.
-
-    ``ch`` is ``"test"`` or ``"prod"``. Used as a plain inline URL button; Telegram
-    recognises the ``t.me/<bot>/<app>`` form and opens the page in the native Mini App
-    container (no browser chrome). The channel selector arrives at the page as
-    ``tgWebAppStartParam``.
-
-    e.g. toc_miniapp_url("Searchplbot", "Today", "test")
-         -> "https://t.me/Searchplbot/Today?startapp=test"
-    """
-    return f"https://t.me/{bot_username.lstrip('@')}/{app_short_name}?startapp={ch}"
