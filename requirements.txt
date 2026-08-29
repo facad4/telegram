@@ -8,3 +8,4 @@ tavily-python
 google-genai
 pyjwt
 playwright
+tzdata

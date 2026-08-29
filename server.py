@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import hashlib
+import html
 import io
 import json
 import logging
@@ -11,17 +12,18 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 import jwt
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from telethon import TelegramClient, Button, functions
 from telethon.sessions import StringSession
-from perplexity_marker import PX_BUTTON_LABEL
+from perplexity_marker import PX_BUTTON_LABEL, TOC_BUTTON_LABEL, toc_page_url, toc_miniapp_url
 from telethon.tl.types import Channel, Chat, MessageMediaPhoto, MessageMediaDocument, PeerChannel, DocumentAttributeVideo
 from google import genai
 from google.genai import types
@@ -39,6 +41,14 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 JWT_SECRET = secrets.token_hex(32)
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_DAYS = 30
+
+# Today's-headlines page (GET /digest/today)
+try:
+    _TOC_TZ = ZoneInfo(os.environ.get("DIGEST_TODAY_TZ", "Asia/Jerusalem"))
+except Exception:
+    _TOC_TZ = timezone.utc
+_TOC_CACHE_TTL = 120
+_toc_cache: dict[str, tuple[float, str]] = {}
 
 
 async def require_auth(request: Request) -> dict:
@@ -80,12 +90,17 @@ async def lifespan(app: FastAPI):
 
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     app.state.bot = None
+    app.state.bot_username = None
     if bot_token and api_id and api_hash:
         try:
             bot = TelegramClient(StringSession(), int(api_id), api_hash)
             await bot.start(bot_token=bot_token)
             app.state.bot = bot
-            logger.info("Telegram bot client connected")
+            try:
+                app.state.bot_username = (await bot.get_me()).username
+            except Exception as e:
+                logger.warning("Could not resolve bot username: %s", e)
+            logger.info("Telegram bot client connected (@%s)", app.state.bot_username)
         except Exception as e:
             logger.warning("Telegram bot client failed to initialize: %s", e)
 
@@ -811,6 +826,225 @@ def _digest_channel_ref() -> int | str:
     return int(channel) if channel.lstrip("-").isdigit() else channel
 
 
+def _toc_channel_ref(ch: str) -> int | str | None:
+    """Resolve the ?ch= param ('test'/'prod') to a Telethon entity ref."""
+    raw = os.environ.get(
+        "TEST_DIGEST_TELEGRAM_CHANNEL" if ch == "test" else "DIGEST_TELEGRAM_CHANNEL"
+    )
+    if not raw:
+        return None
+    return int(raw) if raw.lstrip("-").isdigit() else raw
+
+
+def _toc_headlines_url(target: str, bot_username: str | None) -> str | None:
+    """URL for the "today's headlines" inline button.
+
+    Prefers a Direct Link Mini App (``t.me/<bot>/<app>``) which opens natively inside
+    Telegram with no browser chrome; falls back to the raw ``/digest/today`` page URL
+    (opens in Telegram's in-app browser) when the bot username or app short name is
+    unknown. Returns None when neither can be produced.
+    """
+    ch = "test" if target == "test" else "prod"
+    username = bot_username or os.environ.get("DIGEST_TOC_BOT_USERNAME", "")
+    app_short = os.environ.get("DIGEST_TOC_APP", "")
+    if username and app_short:
+        return toc_miniapp_url(username, app_short, ch)
+    base = os.environ.get("DIGEST_TOC_PUBLIC_URL") or os.environ.get("DIGEST_SERVER_URL", "")
+    key = os.environ.get("DIGEST_TOC_KEY", "")
+    if base and key:
+        return toc_page_url(base, ch, key)
+    return None
+
+
+def _toc_button_rows(bot: TelegramClient | None, target: str,
+                     include_px: bool = True,
+                     bot_username: str | None = None) -> list | None:
+    """Inline-keyboard rows for a digest channel post: Perplexity + today's headlines.
+
+    Returns None when no bot client is available (a user account cannot attach
+    inline keyboards). The headlines row is added only when a headlines URL can be
+    built (see ``_toc_headlines_url``).
+    """
+    if bot is None:
+        return None
+    row: list = []
+    if include_px:
+        row.append(Button.inline(PX_BUTTON_LABEL, b"px"))
+    url = _toc_headlines_url(target, bot_username)
+    if url:
+        row.append(Button.url(TOC_BUTTON_LABEL, url))
+    return [row] if row else None
+
+
+_TOC_UPDATE_PREFIX = "עדכון"
+
+
+def _toc_header(text_plain: str) -> tuple[str, bool]:
+    """Extract a clean one-line headline from a post -> (headline, is_update).
+
+    Digest updates lead with a bare ``**עדכון**`` line followed by the real
+    headline; a marker-only line is skipped in favour of the next line.
+    """
+    is_update = False
+    header = ""
+    for raw in text_plain.splitlines():
+        cleaned = raw.strip().lstrip("#> \t").replace("*", "").replace("__", "").strip("_\"' \t")
+        if not cleaned:
+            continue
+        if not is_update and cleaned.startswith(_TOC_UPDATE_PREFIX):
+            is_update = True
+            rest = cleaned[len(_TOC_UPDATE_PREFIX):].lstrip(":-–— \t").strip()
+            if rest:
+                header = rest
+                break
+            continue  # marker-only line; use the next one
+        header = cleaned
+        break
+    header = " ".join(header.split())
+    if len(header) > 100:
+        header = header[:100].rstrip() + "…"
+    return header, is_update
+
+
+def _render_toc_page(channel_title: str, rows_html: str, message: str = "") -> str:
+    now = datetime.now(_TOC_TZ).strftime("%d/%m/%Y")
+    title = html.escape(channel_title) if channel_title else "הכותרות של היום"
+    body_list = f"<ul>{rows_html}</ul>" if rows_html else ""
+    note = f'<p class="note">{html.escape(message)}</p>' if message else ""
+    return f"""<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>הכותרות של היום</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {{ color-scheme: light dark; }}
+  * {{ box-sizing: border-box; }}
+  body {{ margin: 0;
+         background: var(--tg-theme-bg-color, #0e1117);
+         color: var(--tg-theme-text-color, #e8eaed);
+         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+         line-height: 1.6; }}
+  .wrap {{ max-width: 800px; margin: 0 auto; padding: 20px 16px 48px; }}
+  h1 {{ font-size: 1.3rem; margin: 0 0 4px; }}
+  .date {{ color: var(--tg-theme-hint-color, #9aa0a6); font-size: .9rem; margin-bottom: 20px; }}
+  ul {{ list-style: none; margin: 0; padding: 0; }}
+  li {{ padding: 14px 0;
+        border-bottom: 1px solid var(--tg-theme-section-separator-color, #2d3240);
+        display: flex; gap: 12px; align-items: baseline; justify-content: space-between; }}
+  li a {{ color: var(--tg-theme-text-color, #e8eaed); text-decoration: none;
+          font-size: 1.05rem; flex: 1; }}
+  li a:hover {{ color: var(--tg-theme-link-color, #2196f3); }}
+  .meta {{ color: var(--tg-theme-hint-color, #9aa0a6); font-size: .8rem; white-space: nowrap; }}
+  .tag {{ color: var(--tg-theme-link-color, #2196f3); margin-inline-end: 8px; }}
+  .note {{ color: var(--tg-theme-hint-color, #9aa0a6); }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>{title}</h1>
+  <div class="date">{now}</div>
+  {body_list}
+  {note}
+</div>
+<script>
+  try {{ Telegram.WebApp.ready(); Telegram.WebApp.expand(); }} catch (e) {{}}
+</script>
+</body>
+</html>"""
+
+
+@app.get("/digest/today")
+async def digest_today(request: Request):
+    """Secret-token-gated page listing today's headlines for a digest channel."""
+    key = os.environ.get("DIGEST_TOC_KEY", "")
+    supplied = request.query_params.get("k", "")
+    if not key or not supplied or not secrets.compare_digest(supplied, key):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    # ``ch`` may arrive as an explicit query param (raw-URL fallback) or as the Mini App
+    # start parameter (``t.me/<bot>/<app>?startapp=<ch>`` -> ``tgWebAppStartParam``).
+    ch_raw = request.query_params.get("ch") or request.query_params.get("tgWebAppStartParam")
+    ch = "test" if ch_raw == "test" else "prod"
+    resp_headers = {
+        "X-Robots-Tag": "noindex, nofollow",
+        "Cache-Control": "private, no-store",
+    }
+
+    cached = _toc_cache.get(ch)
+    if cached and (time.time() - cached[0]) < _TOC_CACHE_TTL:
+        return HTMLResponse(cached[1], headers=resp_headers)
+
+    unavailable = _render_toc_page("", "", message="הרשימה אינה זמינה כרגע.")
+    channel_ref = _toc_channel_ref(ch)
+    tg: TelegramClient | None = request.app.state.telegram
+    if channel_ref is None or tg is None:
+        return HTMLResponse(unavailable, headers=resp_headers)
+
+    config = load_config()
+    fetch_limit = max(config.get("fetch_per_channel", 50), 100)
+    media_sem = asyncio.Semaphore(config.get("media_concurrency", 5))
+    try:
+        posts = await fetch_channel_posts_telethon(
+            tg, channel_ref, limit=fetch_limit, media_sem=media_sem
+        )
+    except Exception as e:
+        logger.warning("GET /digest/today: channel fetch failed: %s", e)
+        return HTMLResponse(unavailable, headers=resp_headers)
+
+    today = datetime.now(_TOC_TZ).date()
+    items: list[dict] = []
+    for p in posts:
+        txt = (p.get("text_plain") or "").strip()
+        if not txt:
+            continue
+        if txt.startswith("Run log — "):  # digest-script run-log attachments
+            continue
+        try:
+            dt = datetime.fromisoformat(p.get("datetime") or "")
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local = dt.astimezone(_TOC_TZ)
+        if local.date() != today:
+            continue
+        header, is_update = _toc_header(txt)
+        if not header:
+            continue
+        items.append({
+            "header": header,
+            "url": p.get("post_url") or "",
+            "time": local.strftime("%H:%M"),
+            "is_update": is_update,
+            "sort": dt,
+        })
+
+    items.sort(key=lambda x: x["sort"], reverse=True)
+
+    rows_html = ""
+    for it in items:
+        tag = '<span class="tag">עדכון</span>' if it["is_update"] else ""
+        link = (
+            f'<a href="{html.escape(it["url"], quote=True)}">{html.escape(it["header"])}</a>'
+            if it["url"] else html.escape(it["header"])
+        )
+        rows_html += (
+            f'<li>{link}<span class="meta">{tag}{it["time"]}</span></li>\n'
+        )
+
+    channel_title = posts[0].get("channel_title") if posts else ""
+    page = _render_toc_page(
+        channel_title or "", rows_html,
+        message="" if items else "לא פורסמו כותרות היום.",
+    )
+    _toc_cache[ch] = (time.time(), page)
+    logger.info("GET /digest/today ch=%s -> %d headlines", ch, len(items))
+    return HTMLResponse(page, headers=resp_headers)
+
+
 async def _digest_write_clients(request: Request) -> list[TelegramClient]:
     """Prefer bot, then user client, for edit/delete on the digest channel."""
     bot: TelegramClient | None = request.app.state.bot
@@ -1379,7 +1613,7 @@ async def compose_to_channel(request: Request, user: dict = Depends(require_auth
     sender = bot or tg
     if not sender:
         raise HTTPException(status_code=503, detail="Telegram client not available")
-    buttons = [[Button.inline(PX_BUTTON_LABEL, b"px")]] if bot else None
+    buttons = _toc_button_rows(bot, target, bot_username=request.app.state.bot_username)
     try:
         entity = await sender.get_entity(int(channel) if channel.lstrip("-").isdigit() else channel)
         await sender.send_message(entity, text, link_preview=True, buttons=buttons)
@@ -1424,7 +1658,8 @@ async def upload_image_to_channel(
     buf = io.BytesIO(data)
     buf.name = image.filename or "upload.jpg"
     has_caption = bool(caption.strip())
-    buttons = [[Button.inline(PX_BUTTON_LABEL, b"px")]] if (bot and has_caption) else None
+    buttons = _toc_button_rows(bot, target, include_px=has_caption,
+                              bot_username=request.app.state.bot_username)
     try:
         entity = await sender.get_entity(int(channel) if channel.lstrip("-").isdigit() else channel)
         await sender.send_file(

@@ -8,8 +8,8 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
 - **Database**: Supabase (PostgreSQL) via async Python SDK, encapsulated in `database.py`
 - **Frontend**: Single-page vanilla HTML/CSS/JavaScript application (`static/index.html`) with auto-scrolling tiles
 - **Configuration**: `config.json` for global settings; per-user channel feeds stored in Supabase `Feeds` table
-- **Environment**: `.env` file for secrets (`SUPABASE_URL`, `SUPABASE_KEY`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION`, `GROK_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, `TAVILY_API_KEY`, `NVIDIA_API_KEY`, `NIM_UNIFEED`, `TELEGRAM_BOT_TOKEN`) loaded via `python-dotenv`
-- **Dependencies**: FastAPI, httpx, BeautifulSoup4, supabase, python-dotenv, telethon, google-genai, pyjwt, tavily-python, playwright (see `requirements.txt`). `perplexity_browser.py` additionally requires Windows-only packages (`pyautogui`, `pyperclip`, `pywin32`) that are not listed in `requirements.txt`.
+- **Environment**: `.env` file for secrets (`SUPABASE_URL`, `SUPABASE_KEY`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION`, `GROK_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, `TAVILY_API_KEY`, `NVIDIA_API_KEY`, `NIM_UNIFEED`, `OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`, `DIGEST_TOC_KEY`, `DIGEST_TODAY_TZ`, `DIGEST_TOC_BOT_USERNAME`, `DIGEST_TOC_APP`, `DIGEST_TOC_PUBLIC_URL`) loaded via `python-dotenv`. `DIGEST_TOC_KEY` is the secret token gating `GET /digest/today` (also required on the digest host to build the fallback button URL); `DIGEST_TODAY_TZ` sets the "today" boundary for that page (default `Asia/Jerusalem`). `DIGEST_TOC_BOT_USERNAME` + `DIGEST_TOC_APP` name the Direct Link Mini App (`t.me/<bot>/<app>`) the "הכותרות של היום" button opens natively (see Perplexity/enrichment area); `DIGEST_TOC_PUBLIC_URL` is the public HTTPS origin used only for the raw-URL fallback when the Mini App is not configured (kept separate from `DIGEST_SERVER_URL`, which stays the LAN/dev address for the digest pipeline).
+- **Dependencies**: FastAPI, httpx, BeautifulSoup4, supabase, python-dotenv, telethon, google-genai, pyjwt, tavily-python, playwright, tzdata (see `requirements.txt`). `perplexity_browser.py` additionally requires Windows-only packages (`pyautogui`, `pyperclip`, `pywin32`) that are not listed in `requirements.txt`.
 - **Enrichment listener**: `perplexity_listener.py` runs as a separate long-lived process (bot) and is not part of the web server
 
 ## Core Features
@@ -90,8 +90,8 @@ A real-time dashboard that displays the latest posts from configured Telegram ch
   - `media_concurrency`: Concurrent media downloads (1-20)
   - `ai_provider`: AI provider for Top 10 ranking - "gemini", "mistral", or "groq"
   - `ai_model`: Model name for the selected AI provider
-  - `channel_ai_provider`: AI provider for the alternate feed digest script - "mistral" or "nim" (NVIDIA Inference Microservices)
-  - `channel_ai_model`: Model name for the channel digest AI provider (e.g., `"z-ai/glm-5.2"` for NIM, `"mistral-large-latest"` for Mistral)
+  - `channel_ai_provider`: AI provider for the alternate feed digest script - "mistral", "nim" (NVIDIA Inference Microservices), or "openrouter"
+  - `channel_ai_model`: Model name for the channel digest AI provider (e.g., `"z-ai/glm-5.2"` for NIM, `"mistral-large-latest"` for Mistral, an OpenRouter model slug like `"anthropic/claude-sonnet-4"` for OpenRouter — **required** when `channel_ai_provider` is "openrouter", no default)
   - `channel_max_stories`: Maximum number of stories the digest AI may return per run; substituted into the `{max_stories}` placeholder in `alternate_feed_prompt.md` at runtime (default 3)
   - `hostile_framing_screen_enabled`: When true (default), the digest script holds back any story that reproduces hostile-media framing without attribution (see `alternate_feed_prompt.md` section 1A); held stories are logged to `test_debug.log` for manual review instead of being posted
   - `context_provider`: Context search provider for "More" button - "gemini" or "mistral"
@@ -329,7 +329,7 @@ Uploads an image file to a configured Telegram channel via the bot or user clien
 - 503: Required channel env var not configured, or no Telegram client available
 - 500: Telegram send failure
 
-**Implementation**: Prefers the bot client (`app.state.bot`) so the Perplexity inline button can be attached; falls back to the user client (`app.state.telegram`) if no bot is configured.
+**Implementation**: Prefers the bot client (`app.state.bot`) so the inline buttons can be attached; falls back to the user client (`app.state.telegram`) if no bot is configured. When a bot client is available, the "הכותרות של היום" URL button is also attached (independent of whether a caption is present) via `_toc_button_rows()` → `_toc_headlines_url()`, which prefers a Direct Link Mini App (`t.me/<DIGEST_TOC_BOT_USERNAME>/<DIGEST_TOC_APP>?startapp=<test|prod>`) and falls back to the raw `GET /digest/today` page URL (`DIGEST_TOC_PUBLIC_URL` or `DIGEST_SERVER_URL` + `DIGEST_TOC_KEY`).
 
 #### `POST /api/admin/compose-to-channel` (protected, admin-only)
 Composes and sends a free-text message to a configured Telegram channel via the bot or user client. Used by the admin "Post to Channel" composer in the management panel.
@@ -352,7 +352,7 @@ Composes and sends a free-text message to a configured Telegram channel via the 
 - 503: Required channel env var not configured, or no Telegram client available
 - 500: Telegram send failure
 
-**Implementation**: Prefers the bot client (`app.state.bot`); when a bot is available, a Perplexity inline button (`PX_BUTTON_LABEL`, "ספר לי עוד על זה") is attached so viewers can trigger enrichment. Falls back to the user client if no bot is configured.
+**Implementation**: Prefers the bot client (`app.state.bot`); when a bot is available, two inline buttons are attached via `_toc_button_rows()` — the Perplexity button (`PX_BUTTON_LABEL`, "ספר לי עוד על זה") and the "הכותרות של היום" button (Direct Link Mini App `t.me/<DIGEST_TOC_BOT_USERNAME>/<DIGEST_TOC_APP>?startapp=<target>`, or the raw `GET /digest/today` URL as fallback — see `_toc_headlines_url()`). Falls back to the user client if no bot is configured.
 
 #### `POST /api/top-posts` (protected)
 Sends the user's current feed posts to a configurable AI provider (Google Gemini, Mistral, or Groq) for importance ranking, returns the top 10.
@@ -626,6 +626,16 @@ Tracks share actions for analytics and logging purposes.
 ```
 
 **Implementation**: Frontend calls this endpoint when users share posts via native share or custom share popup (WhatsApp, Telegram, Email, Copy). Logs include username, share method, and post URL.
+
+#### `GET /digest/today` (secret-token gated)
+Public HTML page listing every headline posted **today** (calendar day, `DIGEST_TODAY_TZ`, default `Asia/Jerusalem`) to a digest channel, each linking straight to its message. Opened by the "הכותרות של היום" inline button attached to digest channel posts (see Perplexity/enrichment area) — normally as a **Telegram Mini App** (native, no in-app-browser chrome), falling back to a plain in-app-browser page when the Mini App is not configured.
+
+- **Mini App rendering**: the page loads `https://telegram.org/js/telegram-web-app.js` and calls `Telegram.WebApp.ready()` / `expand()`; its palette uses Telegram theme variables (`--tg-theme-*`) with the dark defaults as fallback, so it also renders fine as a standalone web page. Requires the page be served over **public HTTPS** (Telegram Mini App constraint) — configured as the bot's Web App URL in BotFather (`https://<public-host>/digest/today?k=<DIGEST_TOC_KEY>`).
+- **Auth**: no JWT (a URL button carries no `Authorization` header). Instead a capability token: query param `k` must match env `DIGEST_TOC_KEY` (constant-time compare). For the Mini App the `k` is baked into the BotFather-registered Web App URL. Missing env var or wrong/absent `k` → **404**. Responses carry `X-Robots-Tag: noindex, nofollow` and `Cache-Control: private, no-store`.
+- **Query**: channel selector read from `ch` **or** `tgWebAppStartParam` (Mini App `?startapp=` value) — `test` → `TEST_DIGEST_TELEGRAM_CHANNEL`; `prod` (or absent) → `DIGEST_TELEGRAM_CHANNEL`.
+- **Data**: live read of the channel via the Telethon user client (`fetch_channel_posts_telethon`, same as `/api/channel-posts`) — so it covers digest stories, updates, *and* admin-posted messages. Media-only messages and digest run-log attachments (`Run log — …`) are skipped; the headline is the first meaningful line (bold markers stripped, a leading `עדכון` marker flags an update row), truncated to ~100 chars. Newest first.
+- **Cache**: rendered HTML cached in-process per channel for 120 s.
+- **Degradation**: if the Telethon client or channel env var is unavailable, renders a styled "not available" page (never a stack trace).
 
 #### `GET /health` and `HEAD /health`
 Health check endpoint returning `{"status": "ok"}`. Supports both GET and HEAD methods for efficient health monitoring and keep-alive services.
@@ -1187,6 +1197,7 @@ python generate_alternate_digest.py [options]
 - `DIGEST_PASSWORD` – admin password for login
 - `MISTRAL_API_KEY` – Mistral API key (required when `channel_ai_provider` is "mistral")
 - `NVIDIA_API_KEY` / `NIM_UNIFEED` / `NVIDIA_API_KEY_2` – NVIDIA NIM API keys (required when `channel_ai_provider` is "nim"); any subset may be set. `_next_nim_api_key()` round-robins across whichever are configured, once per run (state persisted in `test_nim_key_state.json`); if only one is set, that key is used for every run with rotation disabled
+- `OPENROUTER_API_KEY` – OpenRouter API key (required when `channel_ai_provider` or `grammar_checker_provider` is "openrouter"); OpenRouter is OpenAI-compatible at `https://openrouter.ai/api/v1`. The `test_generate_alternate_digest.py` copy wires this in; `generate_alternate_digest.py` (production) is left unchanged
 - `DIGEST_TELEGRAM_CHANNEL` – target Telegram channel (`@username` or numeric ID); if not set, Telegram posting is skipped
 - `TEST_DIGEST_TELEGRAM_CHANNEL` – target channel used in `--test` mode
 - `TELEGRAM_API_ID` – Telegram API ID (reused from server config; required for posting)
@@ -1198,7 +1209,8 @@ python generate_alternate_digest.py [options]
 - `AIProvider` (base): OpenAI-compatible chat completion with streaming JSON support, exponential-backoff retry (5s → 15s → 30s) on transient HTTP statuses (429/500/502/503/504) and connection errors, 300s default timeout. `key_name` (optional) tags the instance with the env var name of the credential in use, for error-log attribution. `chat_json(..., max_tokens=None)` accepts an optional per-call token-budget override that takes precedence over the instance's own `self.max_tokens` for that one request, without affecting other calls sharing the same provider instance. On an unrecoverable failure (missing API key, exhausted retries, or a non-200/non-transient status), raises `ProviderRequestError` instead of exiting the process — callers decide whether that's fatal
 - `MistralProvider(AIProvider)`: `https://api.mistral.ai/v1`; supports JSON response format
 - `NIMProvider(AIProvider)`: NVIDIA Inference Microservices at `https://integrate.api.nvidia.com/v1`; supports JSON response format (`response_format: json_object`); `DEFAULT_MAX_TOKENS = 32768` since GLM-5.x's "thinking" mode can consume a large token budget before producing final output
-- `build_provider(config)`: Factory that reads `channel_ai_provider` and `channel_ai_model` from `config.json` and returns the appropriate provider, tagging it with the resolved key's env var name (`key_name`)
+- `OpenRouterProvider(AIProvider)`: OpenRouter at `https://openrouter.ai/api/v1`; OpenAI-compatible, inherits the base streaming/retry/JSON-mode behavior unchanged. `response_format` is passed through to the upstream model; OpenRouter returns reasoning tokens in a separate field (not `content`), so streamed content stays JSON-parseable. Key from `OPENROUTER_API_KEY`. No default model — `channel_ai_model` (or `grammar_checker_model`) must be set explicitly or `build_provider()` raises / the grammar pass is skipped (test script only)
+- `build_provider(config)`: Factory that reads `channel_ai_provider` and `channel_ai_model` from `config.json` and returns the appropriate provider (`mistral`, `nim`, `openrouter`), tagging it with the resolved key's env var name (`key_name`)
 
 **NIM Rate-Limit Handling**: Recurring HTTP 429 responses from NIM were traced to two compounding factors — validation calls fired back-to-back with no pacing, and every call (including small validation calls) reserving the same large token budget meant for full story generation. Log-based forensics (per-key failure-rate tracking) subsequently showed 429s occurring across all rotated keys on the same days, including previously-clean keys — consistent with a shared/account-external constraint on NVIDIA's side rather than something fixable purely by tuning request shape. Mitigations, in the order they were added:
 - **Pacing** (`VALIDATE_CALL_PACING_SECONDS = 5`): a delay inserted before each per-candidate validation call after the first, so requests aren't fired the instant the previous one returns
@@ -1299,6 +1311,18 @@ A per-post enrichment system that lets viewers request additional web-sourced co
 Shared constants used across the server, digest script, and listener:
 - `PX_MARKER`: HTML comment (`<!-- PX_BLOCKQUOTE_START -->`) delimiting the original story text from the appended enrichment blockquote, so the listener can strip a prior enrichment before regenerating
 - `PX_BUTTON_LABEL`: the inline button caption (`"ספר לי עוד על זה"`)
+- `TOC_BUTTON_LABEL`: caption for the second inline button (`"הכותרות של היום"`) that opens the today's-headlines page
+- `toc_page_url(server_base, ch, key)`: builds `"<server>/digest/today?ch=<test|prod>&k=<DIGEST_TOC_KEY>"` (adds `https://` if `server_base` has no scheme) — the **fallback** URL form
+- `toc_miniapp_url(bot_username, app_short_name, ch)`: builds `"https://t.me/<bot>/<app>?startapp=<test|prod>"` — the Direct Link Mini App form; a plain inline URL button with this value opens the page natively inside Telegram (no browser chrome), and the page receives `ch` as `tgWebAppStartParam`
+
+#### "הכותרות של היום" button (today's headlines)
+A second inline URL button attached alongside the Perplexity button on every bot-sent digest channel post (`test_generate_alternate_digest.py`, `POST /api/admin/compose-to-channel`, `POST /api/admin/upload-image-to-channel`). It opens the today's-headlines list (`GET /digest/today`, see API Endpoints) — a scrollable RTL list of today's headlines that deep-link back into the channel. Nothing is posted to the channel when tapped.
+
+**Preferred form — Telegram Mini App**: when `DIGEST_TOC_BOT_USERNAME` + `DIGEST_TOC_APP` are set, the button URL is `toc_miniapp_url(...)` (`t.me/<bot>/<app>?startapp=<test|prod>`) and Telegram opens the page in the native Mini App container (title bar + close only, no address bar). One-time setup: in **BotFather** run `/newapp` on the bot, set the **Web App URL** to `https://<public-host>/digest/today?k=<DIGEST_TOC_KEY>` (public HTTPS required) and the **short name** to match `DIGEST_TOC_APP`. `web_app`-type inline buttons can't be used here (Telegram allows them only in private chats with the bot), which is why the Direct Link form is used.
+
+**Fallback form — raw page URL**: when the Mini App env vars are absent, the button falls back to `toc_page_url(DIGEST_TOC_PUBLIC_URL or DIGEST_SERVER_URL, ch, key)`, which opens `GET /digest/today` in Telegram's in-app browser. `DIGEST_TOC_PUBLIC_URL` is kept separate from `DIGEST_SERVER_URL` so the latter can stay a LAN/dev address for the digest pipeline. The button is omitted entirely only when neither form can produce a URL.
+
+`generate_alternate_digest.py` (production copy) is intentionally left unchanged; the Mini App wiring lives in `test_generate_alternate_digest.py` (`resolve_toc_url()`) and `server.py` (`_toc_headlines_url()`).
 
 #### `perplexity_listener.py`
 A long-running Telethon **bot** listener (run separately via systemd / Task Scheduler / NSSM) that handles inline button taps:
@@ -1493,7 +1517,7 @@ Windows-only enrichment backend that drives a real **Brave** browser via OS auto
 ├── context_summary_prompt.md  # System prompt for Gemini context search with Google Search grounding
 ├── search_terms.md        # Prompt for Mistral AI to extract search terms from posts
 ├── summarize.md           # Prompt for Mistral AI to summarize web search results
-├── perplexity_marker.py   # Shared PX_MARKER / PX_BUTTON_LABEL constants for the enrichment button
+├── perplexity_marker.py   # Shared PX_MARKER / PX_BUTTON_LABEL / TOC_BUTTON_LABEL / toc_page_url() / toc_miniapp_url() for the inline buttons
 ├── perplexity_listener.py # Long-running Telethon bot listener that enriches posts on inline-button taps (Mistral + Tavily)
 ├── perplexity_search.py   # PerplexitySearch: query perplexity.ai via headless Playwright browser
 ├── perplexity_browser.py  # PerplexityBrowser: Windows OS-automation enrichment via Brave + clipboard
@@ -1506,7 +1530,7 @@ Windows-only enrichment backend that drives a real **Brave** browser via OS auto
 ├── test_nim_key_state.json  # Tracks last-used NIM API key index for rotation between NVIDIA_API_KEY/NIM_UNIFEED (created/updated by generate_alternate_digest.py)
 ├── avatar_cache/          # On-disk cache of Telethon channel avatars (JPEG, created at runtime)
 ├── thumb_cache/           # On-disk cache of Telethon post thumbnails (JPEG, created at runtime)
-├── .env                   # Environment variables (SUPABASE_URL, SUPABASE_KEY, TELEGRAM_*, GROK_API_KEY, GOOGLE_API_KEY, MISTRAL_API_KEY, NVIDIA_API_KEY, TAVILY_API_KEY, TELEGRAM_BOT_TOKEN, DIGEST_SERVER_URL, DIGEST_USERNAME, DIGEST_PASSWORD, DIGEST_TELEGRAM_CHANNEL, TEST_DIGEST_TELEGRAM_CHANNEL, PX_MAX_CONCURRENCY, PX_COOLDOWN_S)
+├── .env                   # Environment variables (SUPABASE_URL, SUPABASE_KEY, TELEGRAM_*, GROK_API_KEY, GOOGLE_API_KEY, MISTRAL_API_KEY, NVIDIA_API_KEY, OPENROUTER_API_KEY, TAVILY_API_KEY, TELEGRAM_BOT_TOKEN, DIGEST_SERVER_URL, DIGEST_USERNAME, DIGEST_PASSWORD, DIGEST_TELEGRAM_CHANNEL, TEST_DIGEST_TELEGRAM_CHANNEL, DIGEST_TOC_KEY, DIGEST_TODAY_TZ, DIGEST_TOC_BOT_USERNAME, DIGEST_TOC_APP, DIGEST_TOC_PUBLIC_URL, PX_MAX_CONCURRENCY, PX_COOLDOWN_S)
 ├── requirements.txt       # Python dependencies
 ├── static/
 │   ├── index.html         # Complete frontend application with PWA and share system

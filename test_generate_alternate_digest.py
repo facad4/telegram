@@ -35,7 +35,12 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from telethon import TelegramClient, Button
 from telethon.sessions import StringSession
-from perplexity_marker import PX_BUTTON_LABEL
+from perplexity_marker import (
+    PX_BUTTON_LABEL,
+    TOC_BUTTON_LABEL,
+    toc_page_url,
+    toc_miniapp_url,
+)
 
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -193,6 +198,13 @@ class GroqProvider(AIProvider):
     DEFAULT_MAX_TOKENS = 32768
 
 
+class OpenRouterProvider(AIProvider):
+    BASE_URL = "https://openrouter.ai/api/v1"
+    # OpenRouter passes response_format through to the upstream model; reasoning
+    # tokens are returned in a separate field, not in `content`, so the streamed
+    # content stays parseable as JSON.
+
+
 _NIM_KEY_CACHE: tuple[str, str] | None = None
 
 
@@ -242,6 +254,11 @@ def build_provider(config: dict) -> AIProvider:
     if name == "mistral":
         return MistralProvider(os.environ.get("MISTRAL_API_KEY", ""),
                                model or "mistral-large-latest", max_tokens=max_tokens)
+    if name == "openrouter":
+        if not model:
+            raise ValueError("channel_ai_model must be set when channel_ai_provider is 'openrouter'")
+        return OpenRouterProvider(os.environ.get("OPENROUTER_API_KEY", ""),
+                                  model, max_tokens=max_tokens)
     raise ValueError(f"Unknown channel_ai_provider: {name!r}")
 
 
@@ -262,6 +279,11 @@ def build_grammar_provider(config: dict) -> AIProvider | None:
     if name == "groq":
         return GroqProvider(os.environ.get("GROK_API_KEY", ""),
                             model or "qwen/qwen3.8-27b")
+    if name == "openrouter":
+        if not model:
+            log("grammar_checker_model must be set for openrouter; skipping grammar check.", error=True)
+            return None
+        return OpenRouterProvider(os.environ.get("OPENROUTER_API_KEY", ""), model)
     log(f"Unknown grammar_checker_provider {name!r}; skipping grammar check.", error=True)
     return None
 
@@ -1284,7 +1306,11 @@ async def connect_telegram_bot() -> TelegramClient | None:
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not (api_id and api_hash and bot_token):
         return None
-    client = TelegramClient(StringSession(), int(api_id), api_hash)
+    # Persistent session file: reuses the existing bot authorization instead of
+    # re-running ImportBotAuthorizationRequest every run (which trips Telegram's
+    # flood limit -- "A wait of N seconds is required"). Mirrors perplexity_listener.py.
+    session_path = str(Path(__file__).parent / "digest_bot.session")
+    client = TelegramClient(session_path, int(api_id), api_hash)
     try:
         await client.start(bot_token=bot_token)
         _shared_bot_client = client
@@ -1299,6 +1325,32 @@ async def connect_telegram_bot() -> TelegramClient | None:
         except Exception:
             pass
         return None
+
+
+async def resolve_toc_url(ch: str, base_url: str) -> str | None:
+    """URL for the "today's headlines" inline button.
+
+    Prefers a Direct Link Mini App (``t.me/<bot>/<app>``) that opens natively inside
+    Telegram with no browser chrome; falls back to the raw ``/digest/today`` page URL
+    (``DIGEST_TOC_PUBLIC_URL`` if set, else ``base_url``) when the bot username or the
+    Mini App short name is unknown. ``ch`` is ``"test"`` or ``"prod"``.
+    """
+    username = os.environ.get("DIGEST_TOC_BOT_USERNAME", "")
+    app_short = os.environ.get("DIGEST_TOC_APP", "")
+    if not username:
+        bot_client = await connect_telegram_bot()
+        if bot_client is not None:
+            try:
+                username = (await bot_client.get_me()).username or ""
+            except Exception:
+                username = ""
+    if username and app_short:
+        return toc_miniapp_url(username, app_short, ch)
+    key = os.environ.get("DIGEST_TOC_KEY", "")
+    page_base = os.environ.get("DIGEST_TOC_PUBLIC_URL") or base_url
+    if page_base and key:
+        return toc_page_url(page_base, ch, key)
+    return None
 
 
 async def disconnect_telegram_clients() -> None:
@@ -1346,6 +1398,7 @@ async def post_stories_to_telegram(
     channel: str | int,
     posted_media_hashes: set[str],
     new_story_target: int | None = None,
+    toc_url: str | None = None,
 ) -> set[str]:
     """Post stories to a Telegram channel with multi-layer media dedup.
 
@@ -1362,9 +1415,13 @@ async def post_stories_to_telegram(
 
     bot_client = await connect_telegram_bot()
     sender = bot_client if bot_client is not None else client
-    buttons = [[Button.inline(PX_BUTTON_LABEL, b"px")]] if bot_client else None
+    buttons = None
     if bot_client is not None:
-        log("Posting via bot client (Perplexity button enabled).")
+        row = [Button.inline(PX_BUTTON_LABEL, b"px")]
+        if toc_url:
+            row.append(Button.url(TOC_BUTTON_LABEL, toc_url))
+        buttons = [row]
+        log("Posting via bot client (Perplexity + headlines buttons enabled).")
 
     try:
         entity = await sender.get_entity(channel)
@@ -1773,7 +1830,8 @@ async def main():
         if tg_channel.lstrip("-").isdigit():
             tg_channel = int(tg_channel)
         log(f"Posting single story to Telegram channel {tg_channel}...")
-        await post_stories_to_telegram(single_stories, tg_channel, set())
+        _toc_url = await resolve_toc_url("test", base_url)
+        await post_stories_to_telegram(single_stories, tg_channel, set(), toc_url=_toc_url)
         return
 
     full_history, processed_keys, posted_media_hashes, processed_post_texts = load_history()
@@ -1933,11 +1991,14 @@ async def main():
         else:
             log("Video support disabled; skipping video resolution.")
         log(f"Posting {len(stories)} stories to Telegram channel {tg_channel}...")
+        _toc_ch = "test" if args.test else "prod"
+        _toc_url = await resolve_toc_url(_toc_ch, base_url)
         posted_media_hashes = await post_stories_to_telegram(
             stories,
             tg_channel,
             posted_media_hashes,
             new_story_target=max_stories,
+            toc_url=_toc_url,
         )
         history_items = [story for story in stories if story.get("_post_success")]
     elif args.no_telegram:
