@@ -6,7 +6,10 @@ Usage:
     python generate_alternate_digest.py
 
 Environment variables (from .env or shell):
-    DIGEST_SERVER_URL       – base URL of the TelegramUpdates server
+    DIGEST_SERVER_URL       – production server base URL (fetch when not --test; always the headlines-button host)
+    DIGEST_DEV_SERVER_URL   – dev server base URL, fetched from when --test is set (optional; falls back to DIGEST_SERVER_URL)
+    DIGEST_TOC_SERVER_URL   – public server base URL the "today's headlines" button always links to (optional; falls back to DIGEST_SERVER_URL)
+    DIGEST_TOC_KEY          – secret token for the "today's headlines" button URL (must match the server's value)
     DIGEST_USERNAME         – admin username for login
     DIGEST_PASSWORD         – admin password for login
     MISTRAL_API_KEY         – Mistral API key
@@ -35,7 +38,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from telethon import TelegramClient, Button
 from telethon.sessions import StringSession
-from perplexity_marker import PX_BUTTON_LABEL
+from perplexity_marker import PX_BUTTON_LABEL, TOC_BUTTON_LABEL, toc_page_url
 
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -270,7 +273,7 @@ PROMPT_PATH = Path(__file__).parent / "alternate_feed_prompt.md"
 CONFIG_PATH = Path(__file__).parent / "config.json"
 HISTORY_PATH = Path(__file__).parent / "digest_history.json"
 NIM_KEY_STATE_PATH = Path(__file__).parent / "test_nim_key_state.json"
-DEBUG_LOG_PATH = Path(__file__).parent / "test_debug.log"
+DEBUG_LOG_PATH = Path(__file__).parent / "debug.log"
 NIM_KEY_ENV_NAMES = ["NVIDIA_API_KEY", "NIM_UNIFEED", "NVIDIA_API_KEY_2"]
 GRAMMAR_PROMPT_PATH = Path(__file__).parent / "grammar_checker.md"
 FIRST_RUN_STORY_COUNT = 10
@@ -1036,6 +1039,10 @@ def grammar_check_stories(
     if not stories:
         return
 
+    if not config.get("grammar_check_enabled", True):
+        log("Grammar/language check disabled via config (grammar_check_enabled=false).")
+        return
+
     provider = build_grammar_provider(config)
     if provider is None:
         return
@@ -1284,7 +1291,11 @@ async def connect_telegram_bot() -> TelegramClient | None:
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not (api_id and api_hash and bot_token):
         return None
-    client = TelegramClient(StringSession(), int(api_id), api_hash)
+    # Persistent session file: reuses the existing bot authorization instead of
+    # re-running ImportBotAuthorizationRequest every run (which trips Telegram's
+    # flood limit -- "A wait of N seconds is required"). Mirrors perplexity_listener.py.
+    session_path = str(Path(__file__).parent / "digest_bot.session")
+    client = TelegramClient(session_path, int(api_id), api_hash)
     try:
         await client.start(bot_token=bot_token)
         _shared_bot_client = client
@@ -1346,6 +1357,7 @@ async def post_stories_to_telegram(
     channel: str | int,
     posted_media_hashes: set[str],
     new_story_target: int | None = None,
+    toc_url: str | None = None,
 ) -> set[str]:
     """Post stories to a Telegram channel with multi-layer media dedup.
 
@@ -1362,9 +1374,13 @@ async def post_stories_to_telegram(
 
     bot_client = await connect_telegram_bot()
     sender = bot_client if bot_client is not None else client
-    buttons = [[Button.inline(PX_BUTTON_LABEL, b"px")]] if bot_client else None
+    buttons = None
     if bot_client is not None:
-        log("Posting via bot client (Perplexity button enabled).")
+        row = [Button.inline(PX_BUTTON_LABEL, b"px")]
+        if toc_url:
+            row.append(Button.url(TOC_BUTTON_LABEL, toc_url))
+        buttons = [row]
+        log("Posting via bot client (Perplexity + headlines buttons enabled).")
 
     try:
         entity = await sender.get_entity(channel)
@@ -1675,34 +1691,48 @@ def generate_html(stories: list[dict], output_path: str) -> None:
 
 
 async def main():
-    global HISTORY_PATH
+    global HISTORY_PATH, DEBUG_LOG_PATH
 
     parser = argparse.ArgumentParser(description="Generate an alternate-feed digest via Mistral AI.")
-    parser.add_argument("--server", default=os.environ.get("DIGEST_SERVER_URL", ""), help="Server base URL")
+    parser.add_argument("--server", default=os.environ.get("DIGEST_SERVER_URL", ""),
+                        help="Production server base URL - used for fetch when not --test, and always for the headlines button.")
+    parser.add_argument("--dev-server", default=os.environ.get("DIGEST_DEV_SERVER_URL", ""),
+                        help="Dev server base URL to fetch from when --test is set (falls back to --server).")
+    parser.add_argument("--toc-server", default=os.environ.get("DIGEST_TOC_SERVER_URL", ""),
+                        help="Public server base URL the 'today's headlines' button links to (falls back to --server).")
     parser.add_argument("--username", default=os.environ.get("DIGEST_USERNAME", ""), help="Admin username")
     parser.add_argument("--password", default=os.environ.get("DIGEST_PASSWORD", ""), help="Admin password")
     parser.add_argument("--output", default=None, help="Output HTML file path")
     parser.add_argument("--no-telegram", action="store_true", help="Skip posting to Telegram channel")
     parser.add_argument("--test", action="store_true", help="Test mode: use test history file and TEST_DIGEST_TELEGRAM_CHANNEL")
-    parser.add_argument("--single", action="store_true", help="Skip AI/dedup; post only the first fetched post to the test channel and exit. Requires --test.")
+    parser.add_argument("--single", action="store_true", help="Skip AI/dedup; post only the first fetched post to the channel and exit. Targets DIGEST_TELEGRAM_CHANNEL, or TEST_DIGEST_TELEGRAM_CHANNEL with --test.")
     args = parser.parse_args()
 
     if args.test:
         HISTORY_PATH = Path(__file__).parent / "test_digest_history.json"
-        log("[TEST MODE] Using test_digest_history.json and TEST_DIGEST_TELEGRAM_CHANNEL")
+        DEBUG_LOG_PATH = Path(__file__).parent / "test_debug.log"
+        log("[TEST MODE] Using test_digest_history.json, test_debug.log, TEST_DIGEST_TELEGRAM_CHANNEL")
 
     if args.output is None:
         args.output = "test_alternate_digest.html" if args.test else "alternate_digest.html"
 
-    base_url = args.server.rstrip("/")
-    if base_url and not base_url.startswith(("http://", "https://")):
-        base_url = "http://" + base_url
+    def _norm_url(raw: str) -> str:
+        u = (raw or "").rstrip("/")
+        if u and not u.startswith(("http://", "https://")):
+            u = "http://" + u
+        return u
+
+    prod_url = _norm_url(args.server)
+    dev_url = _norm_url(args.dev_server)
+    base_url = (dev_url or prod_url) if args.test else prod_url   # fetch / login / media
+    toc_base_url = _norm_url(args.toc_server) or prod_url         # headlines button host (public prod web URL)
     username = args.username
     password = args.password
 
     if not base_url:
-        log("Error: server URL required (--server or DIGEST_SERVER_URL env var).", error=True)
+        log("Error: server URL required (--server / DIGEST_SERVER_URL, or --dev-server / DIGEST_DEV_SERVER_URL with --test).", error=True)
         sys.exit(1)
+    log(f"Fetching from {base_url}; headlines button links to {toc_base_url or '(disabled)'}")
     if not username or not password:
         log("Error: username and password required (--username/--password or DIGEST_USERNAME/DIGEST_PASSWORD env vars).", error=True)
         sys.exit(1)
@@ -1733,9 +1763,6 @@ async def main():
         sys.exit(0)
 
     if args.single:
-        if not args.test:
-            log("--single requires --test mode (uses TEST_DIGEST_TELEGRAM_CHANNEL).", error=True)
-            sys.exit(1)
         first_post = all_posts[0]
         text = _get_post_text(first_post) or "(empty)"
         log(f"[SINGLE MODE] Posting first fetched post: {text[:80]}...")
@@ -1766,14 +1793,18 @@ async def main():
         else:
             s["video_thumb_urls"] = s["video_thumb_urls"][:1]
 
-        tg_channel = os.environ.get("TEST_DIGEST_TELEGRAM_CHANNEL", "")
+        _chan_env = "TEST_DIGEST_TELEGRAM_CHANNEL" if args.test else "DIGEST_TELEGRAM_CHANNEL"
+        tg_channel = os.environ.get(_chan_env, "")
         if not tg_channel:
-            log("TEST_DIGEST_TELEGRAM_CHANNEL not set; cannot post.", error=True)
+            log(f"{_chan_env} not set; cannot post.", error=True)
             sys.exit(1)
         if tg_channel.lstrip("-").isdigit():
             tg_channel = int(tg_channel)
         log(f"Posting single story to Telegram channel {tg_channel}...")
-        await post_stories_to_telegram(single_stories, tg_channel, set())
+        _toc_key = os.environ.get("DIGEST_TOC_KEY", "")
+        _toc_ch = "test" if args.test else "prod"
+        _toc_url = toc_page_url(toc_base_url, _toc_ch, _toc_key) if (toc_base_url and _toc_key) else None
+        await post_stories_to_telegram(single_stories, tg_channel, set(), toc_url=_toc_url)
         return
 
     full_history, processed_keys, posted_media_hashes, processed_post_texts = load_history()
@@ -1933,11 +1964,15 @@ async def main():
         else:
             log("Video support disabled; skipping video resolution.")
         log(f"Posting {len(stories)} stories to Telegram channel {tg_channel}...")
+        _toc_key = os.environ.get("DIGEST_TOC_KEY", "")
+        _toc_ch = "test" if args.test else "prod"
+        _toc_url = toc_page_url(toc_base_url, _toc_ch, _toc_key) if (toc_base_url and _toc_key) else None
         posted_media_hashes = await post_stories_to_telegram(
             stories,
             tg_channel,
             posted_media_hashes,
             new_story_target=max_stories,
+            toc_url=_toc_url,
         )
         history_items = [story for story in stories if story.get("_post_success")]
     elif args.no_telegram:

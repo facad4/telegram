@@ -16,5 +16,6 @@
   "channel_max_stories": 3,
   "grammar_checker_provider": "groq",
   "grammar_checker_model": "qwen/qwen3.8-27b",
+  "grammar_check_enabled": false,
   "hostile_framing_screen_enabled": true
 }

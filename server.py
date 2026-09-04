@@ -541,6 +541,9 @@ async def _fetch_channel_posts_telethon_once(
             "channel_photo": channel_photo,
             "post_id": str(msg.id),
             "post_url": post_url,
+            "reply_to_msg_id": (
+                str(msg.reply_to_msg_id) if getattr(msg, "reply_to_msg_id", None) else None
+            ),
             "text_html": text_html,
             "text_plain": text_plain,
             "views": views,
@@ -882,10 +885,200 @@ def _toc_header(text_plain: str) -> tuple[str, bool]:
     return header, is_update
 
 
-def _render_toc_page(channel_title: str, rows_html: str, message: str = "") -> str:
+_TOC_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+_TOC_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+
+
+def _toc_local_dt(post: dict) -> datetime | None:
+    """Parse a post's ISO datetime into an _TOC_TZ-local aware datetime, or None."""
+    try:
+        dt = datetime.fromisoformat(post.get("datetime") or "")
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_TOC_TZ)
+
+
+def _toc_bubble_parts(text_plain: str) -> tuple[bool, str]:
+    """Render a channel message for a thread bubble -> (is_update, safe_html_body).
+
+    A leading bare ``**עדכון**`` marker line is stripped and reported via the flag.
+    Only <b> and http(s) <a> tags survive; everything else is HTML-escaped.
+    """
+    lines = (text_plain or "").splitlines()
+    is_update = False
+    start = 0
+    for i, raw in enumerate(lines):
+        cleaned = raw.strip().lstrip("#> \t").replace("*", "").replace("__", "").strip("_\"' \t")
+        if not cleaned:
+            start = i + 1
+            continue
+        marker = cleaned.startswith(_TOC_UPDATE_PREFIX) and not cleaned[
+            len(_TOC_UPDATE_PREFIX):
+        ].lstrip(":-–— \t").strip()
+        if marker:
+            is_update = True
+            start = i + 1
+            continue
+        break
+    body = "\n".join(lines[start:]).strip()
+
+    tokens: list[str] = []
+
+    def _stash(htmls: str) -> str:
+        tokens.append(htmls)
+        return f"\x00{len(tokens) - 1}\x00"
+
+    body = _TOC_LINK_RE.sub(
+        lambda m: _stash(
+            f'<a href="{html.escape(m.group(2), quote=True)}">{html.escape(m.group(1))}</a>'
+        ),
+        body,
+    )
+    body = _TOC_BOLD_RE.sub(lambda m: _stash(f"<b>{html.escape(m.group(1))}</b>"), body)
+    body = html.escape(body).replace("\n", "<br>")
+    body = re.sub(r"\x00(\d+)\x00", lambda m: tokens[int(m.group(1))], body)
+    return is_update, body
+
+
+def _toc_render_thread(modal_id: str, channel_title: str, initial: str,
+                       original: dict, updates: list[dict]) -> str:
+    """Hidden popup markup: the original post + its updates as Telegram-style bubbles."""
+    def _bubble(post: dict) -> str:
+        is_upd, body = _toc_bubble_parts(post.get("text_plain") or "")
+        label = '<div class="bubble-label">עדכון</div>' if is_upd else ""
+        local = _toc_local_dt(post)
+        time_html = (
+            f'<div class="bubble-time">{local.strftime("%H:%M")}</div>' if local else ""
+        )
+        url = post.get("post_url") or ""
+        if url:
+            return (
+                f'<a class="bubble" href="{html.escape(url, quote=True)}">'
+                f'{label}<div class="bubble-body">{body}</div>{time_html}</a>'
+            )
+        return (
+            f'<div class="bubble">{label}<div class="bubble-body">{body}</div>'
+            f'{time_html}</div>'
+        )
+
+    bubbles = _bubble(original) + "".join(_bubble(u) for u in updates)
+    ct = html.escape((channel_title or "").strip()) or "הכותרות של היום"
+    return (
+        f'<div class="modal" id="{modal_id}" hidden>'
+        f'<div class="modal-bg" data-close></div>'
+        f'<div class="modal-card" role="dialog" aria-modal="true">'
+        f'<div class="modal-head">'
+        f'<div class="avatar">{html.escape(initial)}</div>'
+        f'<div class="modal-title">{ct}</div>'
+        f'<button type="button" class="modal-x" data-close aria-label="סגור">&times;</button>'
+        f'</div>'
+        f'<div class="thread">{bubbles}</div>'
+        f'</div></div>'
+    )
+
+
+def _toc_feed_html(posts: list[dict], today, channel_title: str) -> tuple[str, str, int]:
+    """Build ``(rows_html, modals_html, item_count)`` for the today's-headlines feed.
+
+    Digest updates (posted as Telegram replies to their original story) are folded
+    into the original's row with a "הצג עדכונים" link that opens a thread popup.
+    """
+    initial = ((channel_title or "").strip()[:1]) or "•"
+    by_id = {p.get("post_id"): p for p in posts if p.get("post_id")}
+
+    updates_of: dict[str, list[dict]] = {}
+    consumed: set[str] = set()
+    for p in posts:
+        rid = p.get("reply_to_msg_id")
+        if rid and rid in by_id and _toc_header(p.get("text_plain") or "")[1]:
+            updates_of.setdefault(rid, []).append(p)
+            consumed.add(p.get("post_id"))
+    _floor = datetime.min.replace(tzinfo=_TOC_TZ)
+    for lst in updates_of.values():  # get_messages is newest-first; thread wants oldest-first
+        lst.sort(key=lambda u: (_toc_local_dt(u) or _floor))
+
+    items: list[dict] = []
+    modals: list[str] = []
+    for p in posts:
+        pid = p.get("post_id")
+        if pid in consumed:
+            continue
+        txt = (p.get("text_plain") or "").strip()
+        if not txt or txt.startswith("Run log — "):
+            continue
+        header, is_update = _toc_header(txt)
+        if not header:
+            continue
+        local = _toc_local_dt(p)
+        if local is None:
+            continue
+
+        ups = updates_of.get(pid)
+        if ups:
+            up_locals = [d for d in (_toc_local_dt(u) for u in ups) if d]
+            if not up_locals:
+                continue
+            latest = max(up_locals)
+            if local.date() != today and latest.date() != today:
+                continue
+            mid = f"u{len(modals) + 1}"
+            modals.append(_toc_render_thread(mid, channel_title, initial, p, ups))
+            disp = latest if latest.date() == today else local
+            items.append({
+                "kind": "group", "header": header, "url": p.get("post_url") or "",
+                "time": disp.strftime("%H:%M"), "count": len(ups), "modal_id": mid,
+                "sort": max([local, *up_locals]),
+            })
+        else:
+            if local.date() != today:
+                continue
+            items.append({
+                "kind": "row", "header": header, "url": p.get("post_url") or "",
+                "time": local.strftime("%H:%M"), "is_update": is_update, "sort": local,
+            })
+
+    items.sort(key=lambda x: x["sort"], reverse=True)
+
+    rows_html = ""
+    for it in items:
+        if it["kind"] == "group":
+            n = it["count"]
+            btn = "הצג עדכון" if n == 1 else f"הצג עדכונים ({n})"
+            head = (
+                f'<a class="h" href="{html.escape(it["url"], quote=True)}">'
+                f'{html.escape(it["header"])}</a>'
+                if it["url"] else f'<span class="h">{html.escape(it["header"])}</span>'
+            )
+            rows_html += (
+                f'<div class="row">{head}<span class="m">'
+                f'<button type="button" class="upd" data-modal="{it["modal_id"]}">{btn}</button>'
+                f'{it["time"]}</span></div>\n'
+            )
+        else:
+            tag = '<span class="tag">עדכון</span>' if it["is_update"] else ""
+            inner = (
+                f'<span class="h">{html.escape(it["header"])}</span>'
+                f'<span class="m">{tag}{it["time"]}</span>'
+            )
+            if it["url"]:
+                rows_html += (
+                    f'<a class="row" href="{html.escape(it["url"], quote=True)}">{inner}</a>\n'
+                )
+            else:
+                rows_html += f'<div class="row">{inner}</div>\n'
+
+    return rows_html, "".join(modals), len(items)
+
+
+def _render_toc_page(channel_title: str, rows_html: str, message: str = "",
+                     modals_html: str = "") -> str:
     now = datetime.now(_TOC_TZ).strftime("%d/%m/%Y")
-    title = html.escape(channel_title) if channel_title else "הכותרות של היום"
-    body_list = f"<ul>{rows_html}</ul>" if rows_html else ""
+    name = (channel_title or "").strip()
+    title = html.escape(name) if name else "הכותרות של היום"
+    initial = html.escape(name[:1]) if name else "•"
+    body_list = f'<div class="feed">{rows_html}</div>' if rows_html else ""
     note = f'<p class="note">{html.escape(message)}</p>' if message else ""
     return f"""<!DOCTYPE html>
 <html lang="he" dir="rtl">
@@ -893,33 +1086,141 @@ def _render_toc_page(channel_title: str, rows_html: str, message: str = "") -> s
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" id="mtc" content="#FBFAF4">
 <title>הכותרות של היום</title>
+<script>
+(function () {{
+  try {{
+    if (localStorage.getItem('digest_toc_theme') === 'dark')
+      document.documentElement.setAttribute('data-theme', 'dark');
+  }} catch (e) {{}}
+}})();
+function toggleTheme() {{
+  var el = document.documentElement;
+  var dark = el.getAttribute('data-theme') !== 'dark';
+  if (dark) el.setAttribute('data-theme', 'dark');
+  else el.removeAttribute('data-theme');
+  try {{ localStorage.setItem('digest_toc_theme', dark ? 'dark' : 'light'); }} catch (e) {{}}
+  var m = document.getElementById('mtc');
+  if (m) m.content = dark ? '#0e1117' : '#FBFAF4';
+}}
+function closeModal(m) {{ if (m) {{ m.hidden = true; document.body.style.overflow = ''; }} }}
+document.addEventListener('click', function (e) {{
+  var opener = e.target.closest('[data-modal]');
+  if (opener) {{
+    e.preventDefault();
+    var m = document.getElementById(opener.getAttribute('data-modal'));
+    if (m) {{ m.hidden = false; document.body.style.overflow = 'hidden'; }}
+    return;
+  }}
+  if (e.target.closest('[data-close]')) closeModal(e.target.closest('.modal'));
+}});
+document.addEventListener('keydown', function (e) {{
+  if (e.key === 'Escape') closeModal(document.querySelector('.modal:not([hidden])'));
+}});
+</script>
 <style>
-  :root {{ color-scheme: dark; }}
+  :root {{
+    color-scheme: light;
+    --bg: #FBFAF4; --card-bg: #F1EFE8; --text: #091717; --text-secondary: #5C6B6B;
+    --accent: #20808D; --border: #E0DED6;
+  }}
+  :root[data-theme="dark"] {{
+    color-scheme: dark;
+    --bg: #0e1117; --card-bg: #1a1d27; --text: #e8eaed; --text-secondary: #9aa0a6;
+    --accent: #2196f3; --border: #2d3240;
+  }}
   * {{ box-sizing: border-box; }}
-  body {{ margin: 0; background: #0e1117; color: #e8eaed;
-         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  body {{ margin: 0; background: var(--bg); color: var(--text);
+         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
          line-height: 1.6; }}
-  .wrap {{ max-width: 800px; margin: 0 auto; padding: 20px 16px 48px; }}
-  h1 {{ font-size: 1.3rem; margin: 0 0 4px; }}
-  .date {{ color: #9aa0a6; font-size: .9rem; margin-bottom: 20px; }}
-  ul {{ list-style: none; margin: 0; padding: 0; }}
-  li {{ padding: 14px 0; border-bottom: 1px solid #2d3240;
-        display: flex; gap: 12px; align-items: baseline; justify-content: space-between; }}
-  li a {{ color: #e8eaed; text-decoration: none; font-size: 1.05rem; flex: 1; }}
-  li a:hover {{ color: #2196f3; }}
-  .meta {{ color: #9aa0a6; font-size: .8rem; white-space: nowrap; }}
-  .tag {{ color: #2196f3; margin-inline-end: 8px; }}
-  .note {{ color: #9aa0a6; }}
+  .top {{ display: flex; align-items: center; gap: 12px;
+          max-width: 800px; margin: 0 auto; padding: 12px 16px;
+          border-bottom: 1px solid var(--border); }}
+  .avatar {{ width: 42px; height: 42px; border-radius: 50%; flex-shrink: 0;
+             background: var(--accent); color: #fff; font-weight: 700; font-size: 1.2rem;
+             display: flex; align-items: center; justify-content: center; }}
+  .top .id {{ min-width: 0; }}
+  h1 {{ font-size: 1.15rem; margin: 0;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .date {{ color: var(--text-secondary); font-size: .82rem; }}
+  .theme-toggle {{ margin-inline-start: auto; flex-shrink: 0;
+                   width: 38px; height: 38px; padding: 0;
+                   display: flex; align-items: center; justify-content: center;
+                   background: var(--card-bg); border: 1px solid var(--border);
+                   border-radius: 10px; color: var(--text-secondary); cursor: pointer; }}
+  .theme-toggle:hover {{ border-color: var(--accent); color: var(--accent); }}
+  .theme-toggle svg {{ width: 18px; height: 18px; fill: currentColor; }}
+  .theme-toggle .sun {{ display: none; }}
+  :root[data-theme="dark"] .theme-toggle .moon {{ display: none; }}
+  :root[data-theme="dark"] .theme-toggle .sun {{ display: block; }}
+  .feed {{ max-width: 720px; margin: 0 auto; padding: 8px 18px 56px; }}
+  .row {{ display: flex; gap: 16px; align-items: baseline;
+          justify-content: space-between; padding: 16px 0;
+          border-bottom: 1px solid var(--border);
+          border-inline-start: 2px solid transparent; text-decoration: none;
+          transition: border-color .15s ease, padding .15s ease; }}
+  .feed > :last-child {{ border-bottom-color: transparent; }}
+  .row:hover {{ border-inline-start-color: var(--accent); padding-inline-start: 12px; }}
+  .h {{ color: var(--text); font-size: 1.05rem; line-height: 1.55;
+        transition: color .15s ease; }}
+  .row:hover .h {{ color: var(--accent); }}
+  .m {{ flex-shrink: 0; font-size: .74rem; color: var(--text-secondary);
+        white-space: nowrap; letter-spacing: .03em; font-variant-numeric: tabular-nums; }}
+  .tag {{ color: var(--accent); font-weight: 600;
+          letter-spacing: 0; margin-inline-end: 6px; }}
+  .upd {{ font: inherit; font-size: .74rem; font-weight: 600; color: var(--accent);
+          background: none; border: 0; padding: 0; cursor: pointer;
+          text-decoration: underline; margin-inline-end: 8px; }}
+  .note {{ text-align: center; color: var(--text-secondary); padding: 40px 16px; }}
+  .modal[hidden] {{ display: none; }}
+  .modal {{ position: fixed; inset: 0; z-index: 50; display: flex;
+            align-items: flex-end; justify-content: center; }}
+  .modal-bg {{ position: absolute; inset: 0; background: rgba(0, 0, 0, .55); }}
+  .modal-card {{ position: relative; width: 100%; max-width: 640px; max-height: 85vh;
+                 display: flex; flex-direction: column; background: var(--bg);
+                 border: 1px solid var(--border); border-radius: 16px 16px 0 0;
+                 overflow: hidden; }}
+  .modal-head {{ display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+                 padding: 12px 14px; border-bottom: 1px solid var(--border); }}
+  .modal-head .avatar {{ width: 32px; height: 32px; font-size: .95rem; }}
+  .modal-title {{ flex: 1; min-width: 0; font-weight: 600; font-size: .98rem;
+                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .modal-x {{ background: none; border: 0; color: var(--text-secondary);
+              font-size: 1.6rem; line-height: 1; cursor: pointer; padding: 0 4px; }}
+  .thread {{ padding: 14px; overflow-y: auto; display: flex;
+             flex-direction: column; gap: 8px; }}
+  .bubble {{ display: block; align-self: flex-start; max-width: 92%;
+             background: var(--card-bg); border: 1px solid var(--border);
+             border-radius: 14px; border-start-start-radius: 4px;
+             padding: 8px 12px 6px; color: var(--text); text-decoration: none; }}
+  .bubble:hover {{ border-color: var(--accent); }}
+  .bubble-label {{ color: var(--accent); font-weight: 700; font-size: .72rem;
+                   margin-bottom: 3px; }}
+  .bubble-body {{ font-size: .95rem; line-height: 1.5; }}
+  .bubble-body b {{ font-weight: 700; }}
+  .bubble-time {{ margin-top: 4px; font-size: .68rem; color: var(--text-secondary); }}
+  @media (min-width: 560px) {{
+    .modal {{ align-items: center; }}
+    .modal-card {{ border-radius: 16px; }}
+  }}
 </style>
 </head>
 <body>
-<div class="wrap">
-  <h1>{title}</h1>
-  <div class="date">{now}</div>
-  {body_list}
-  {note}
+<div class="top">
+  <div class="avatar">{initial}</div>
+  <div class="id">
+    <h1>{title}</h1>
+    <div class="date">{now}</div>
+  </div>
+  <button class="theme-toggle" onclick="toggleTheme()" aria-label="החלף ערכת נושא">
+    <svg class="moon" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z"/></svg>
+    <svg class="sun" viewBox="0 0 24 24"><path d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zM2 13h2c.55 0 1-.45 1-1s-.45-1-1-1H2c-.55 0-1 .45-1 1s.45 1 1 1zm18 0h2c.55 0 1-.45 1-1s-.45-1-1-1h-2c-.55 0-1 .45-1 1s.45 1 1 1zM11 2v2c0 .55.45 1 1 1s1-.45 1-1V2c0-.55-.45-1-1-1s-1 .45-1 1zm0 18v2c0 .55.45 1 1 1s1-.45 1-1v-2c0-.55-.45-1-1-1s-1 .45-1 1zM5.99 4.58a.996.996 0 0 0-1.41 0 .996.996 0 0 0 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0s.39-1.03 0-1.41L5.99 4.58zm12.37 12.37a.996.996 0 0 0-1.41 0 .996.996 0 0 0 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0a.996.996 0 0 0 0-1.41l-1.06-1.06zm1.06-10.96a.996.996 0 0 0 0-1.41.996.996 0 0 0-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06zM7.05 18.36a.996.996 0 0 0 0-1.41.996.996 0 0 0-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06z"/></svg>
+  </button>
 </div>
+{body_list}
+{note}
+{modals_html}
 </body>
 </html>"""
 
@@ -960,53 +1261,16 @@ async def digest_today(request: Request):
         return HTMLResponse(unavailable, headers=resp_headers)
 
     today = datetime.now(_TOC_TZ).date()
-    items: list[dict] = []
-    for p in posts:
-        txt = (p.get("text_plain") or "").strip()
-        if not txt:
-            continue
-        if txt.startswith("Run log — "):  # digest-script run-log attachments
-            continue
-        try:
-            dt = datetime.fromisoformat(p.get("datetime") or "")
-        except ValueError:
-            continue
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        local = dt.astimezone(_TOC_TZ)
-        if local.date() != today:
-            continue
-        header, is_update = _toc_header(txt)
-        if not header:
-            continue
-        items.append({
-            "header": header,
-            "url": p.get("post_url") or "",
-            "time": local.strftime("%H:%M"),
-            "is_update": is_update,
-            "sort": dt,
-        })
-
-    items.sort(key=lambda x: x["sort"], reverse=True)
-
-    rows_html = ""
-    for it in items:
-        tag = '<span class="tag">עדכון</span>' if it["is_update"] else ""
-        link = (
-            f'<a href="{html.escape(it["url"], quote=True)}">{html.escape(it["header"])}</a>'
-            if it["url"] else html.escape(it["header"])
-        )
-        rows_html += (
-            f'<li>{link}<span class="meta">{tag}{it["time"]}</span></li>\n'
-        )
-
     channel_title = posts[0].get("channel_title") if posts else ""
+    rows_html, modals_html, count = _toc_feed_html(posts, today, channel_title or "")
+
     page = _render_toc_page(
         channel_title or "", rows_html,
-        message="" if items else "לא פורסמו כותרות היום.",
+        message="" if count else "לא פורסמו כותרות היום.",
+        modals_html=modals_html,
     )
     _toc_cache[ch] = (time.time(), page)
-    logger.info("GET /digest/today ch=%s -> %d headlines", ch, len(items))
+    logger.info("GET /digest/today ch=%s -> %d items", ch, count)
     return HTMLResponse(page, headers=resp_headers)
 
 

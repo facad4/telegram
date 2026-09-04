@@ -272,6 +272,7 @@ Returns the latest posts from the logged-in user's configured main-feed channels
     "channel_photo": "https://cdn.../avatar.jpg",
     "post_id": "12345",
     "post_url": "https://t.me/channelname/12345",
+    "reply_to_msg_id": null,
     "text_html": "<div>...</div>",
     "text_plain": "Plain text content",
     "views": "1.2K",
@@ -291,7 +292,7 @@ Returns the latest posts from the logged-in user's configured main-feed channels
 ]
 ```
 
-For private channel posts, `photo_url` and `channel_photo` are relative `/api/thumb/...` and `/api/avatar/...` URLs (served by the media cache endpoints), and `post_url` uses the format `https://t.me/c/{channel_id}/{msg_id}`.
+For private channel posts, `photo_url` and `channel_photo` are relative `/api/thumb/...` and `/api/avatar/...` URLs (served by the media cache endpoints), and `post_url` uses the format `https://t.me/c/{channel_id}/{msg_id}`. `reply_to_msg_id` (string message id the post replies to, or `null`) is only populated on the Telethon path and is used by `GET /digest/today` to group digest updates under their original story.
 
 #### `POST /api/admin/share-to-channel` (protected, admin-only)
 Forwards a post from any channel to the configured `DIGEST_TELEGRAM_CHANNEL` via Telethon.
@@ -632,9 +633,11 @@ Public HTML page listing every headline posted **today** (calendar day, `DIGEST_
 
 - **Auth**: no JWT (a URL button carries no `Authorization` header). Instead a capability token: query param `k` must match env `DIGEST_TOC_KEY` (constant-time compare). Missing env var or wrong/absent `k` → **404**. Responses carry `X-Robots-Tag: noindex, nofollow` and `Cache-Control: private, no-store`.
 - **Query**: `ch=test` → `TEST_DIGEST_TELEGRAM_CHANNEL`; `ch=prod` (or absent) → `DIGEST_TELEGRAM_CHANNEL`.
-- **Data**: live read of the channel via the Telethon user client (`fetch_channel_posts_telethon`, same as `/api/channel-posts`) — so it covers digest stories, updates, *and* admin-posted messages. Media-only messages and digest run-log attachments (`Run log — …`) are skipped; the headline is the first meaningful line (bold markers stripped, a leading `עדכון` marker flags an update row), truncated to ~100 chars. Newest first.
-- **Cache**: rendered HTML cached in-process per channel for 120 s.
+- **Data**: live read of the channel via the Telethon user client (`fetch_channel_posts_telethon`, same as `/api/channel-posts`) — so it covers digest stories, updates, *and* admin-posted messages. Media-only messages and digest run-log attachments (`Run log — …`) are skipped; the headline is the first meaningful line (bold markers stripped, a leading `עדכון` marker flags an update), truncated to ~100 chars. Newest first.
+- **Update grouping**: digest updates are posted to Telegram as *replies* to their original story's message (`_fetch_channel_posts_telethon_once` now returns `reply_to_msg_id`). `_toc_feed_html` folds every update into its original's row instead of giving it a standalone row: the row shows the **original story's headline** plus a `הצג עדכונים (N)` button that opens a popup with the original post and all its updates as text-only Telegram-style bubbles (`_toc_render_thread` / `_toc_bubble_parts` — `**bold**` and `http(s)` links preserved, everything else escaped; original first, updates oldest→newest, `עדכון` label + `HH:MM` per bubble, each bubble links to its message). A story surfaces today when the **original or any update** is from today; the row is sorted/timestamped by the latest update. An update whose original is outside the fetched window falls back to a plain standalone row with the `עדכון` tag.
+- **Cache**: rendered HTML cached in-process per channel for 120 s (popup markup is inlined in that HTML — no extra request).
 - **Degradation**: if the Telethon client or channel env var is unavailable, renders a styled "not available" page (never a stack trace).
+- **Appearance**: styled to match the main web app (`static/index.html`) — defaults to the light "paper white" theme with a header-bar toggle for the dark palette (the two token sets are copied from `static/index.html`). The choice is stored client-side in `localStorage` under `digest_toc_theme` (`light`/`dark`, default `light`) — independent of the main app's `theme` key. Headlines render as a clean divider-separated list (RTL): each row is the headline with the post time (and an `עדכון` tag / `הצג עדכונים` button) trailing, an accent inline-start marker on hover; the headline links to the Telegram message. The popup is a centered dialog on desktop and a bottom sheet on mobile (backdrop / `×` / `Esc` to close).
 
 #### `GET /health` and `HEAD /health`
 Health check endpoint returning `{"status": "ok"}`. Supports both GET and HEAD methods for efficient health monitoring and keep-alive services.
@@ -1314,7 +1317,7 @@ Shared constants used across the server, digest script, and listener:
 - `toc_page_url(server_base, ch, key)`: builds `"<server>/digest/today?ch=<test|prod>&k=<DIGEST_TOC_KEY>"` (adds `https://` if `server_base` has no scheme)
 
 #### "הכותרות של היום" button (today's headlines)
-A second inline URL button attached alongside the Perplexity button on every bot-sent digest channel post (`test_generate_alternate_digest.py`, `POST /api/admin/compose-to-channel`, `POST /api/admin/upload-image-to-channel`). It opens `GET /digest/today` (see API Endpoints) in Telegram's in-app browser — a scrollable RTL list of today's headlines that deep-link back into the channel. Nothing is posted to the channel when tapped. The button is added only when the bot client is available **and** `DIGEST_SERVER_URL` + `DIGEST_TOC_KEY` are both set (the same `DIGEST_TOC_KEY` value must be configured on the server and on the digest host). `generate_alternate_digest.py` (production copy) is intentionally left unchanged.
+A second inline URL button attached alongside the Perplexity button on every bot-sent digest channel post (`test_generate_alternate_digest.py`, `POST /api/admin/compose-to-channel`, `POST /api/admin/upload-image-to-channel`). It opens `GET /digest/today` (see API Endpoints) in Telegram's in-app browser — a scrollable RTL list of today's headlines (light "paper white" theme by default, with a dark-mode toggle) that deep-link back into the channel; updates are grouped under their original story with a "הצג עדכונים" popup. Nothing is posted to the channel when tapped. The button is added only when the bot client is available **and** `DIGEST_SERVER_URL` + `DIGEST_TOC_KEY` are both set (the same `DIGEST_TOC_KEY` value must be configured on the server and on the digest host). `generate_alternate_digest.py` (production copy) is intentionally left unchanged.
 
 #### `perplexity_listener.py`
 A long-running Telethon **bot** listener (run separately via systemd / Task Scheduler / NSSM) that handles inline button taps:

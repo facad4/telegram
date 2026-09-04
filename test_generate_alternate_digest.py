@@ -1053,6 +1053,10 @@ def grammar_check_stories(
     if not stories:
         return
 
+    if not config.get("grammar_check_enabled", True):
+        log("Grammar/language check disabled via config (grammar_check_enabled=false).")
+        return
+
     provider = build_grammar_provider(config)
     if provider is None:
         return
